@@ -7,7 +7,7 @@
  * board is on a desk somewhere reading a struct that is no longer there.
  *
  * So: one named callback typedef and one named subscribe function per event.
- * Underneath, wfc_event.c holds the callback in a union of those eleven types
+ * Underneath, wfc_event.c holds the callback in a union of those twelve types
  * rather than casting a generic pointer, so there is no unchecked step at
  * all. Changing what an event carries produces a list of the callers that
  * have to change with it, which is the entire point.
@@ -103,6 +103,15 @@ typedef void (*wfc_on_friend_list_update_t)(size_t n, void *ud);
  * again: query the store. */
 typedef void (*wfc_on_friend_request_update_t)(size_t n, void *ud);
 
+/* The account's user settings changed; `n` entries were touched. Raised both
+ * when UG delivers a batch and when this client's own UP is acknowledged, so
+ * a screen showing a setting does not need to know which happened.
+ *
+ * A setting that pins or mutes a conversation ALSO raises a
+ * conversation-update for that conversation, so a list that already redraws
+ * on that event needs nothing from this one. */
+typedef void (*wfc_on_user_settings_update_t)(size_t n, void *ud);
+
 /* A conference event the server pushed on CONFN: a participant published or
  * unpublished, someone joined or left, the room was destroyed.
  *
@@ -135,6 +144,8 @@ wfc_subscription_t *wfc_on_group_members_update(wfc_on_group_members_update_t cb
 wfc_subscription_t *wfc_on_friend_list_update(wfc_on_friend_list_update_t cb, void *ud);
 wfc_subscription_t *wfc_on_friend_request_update(wfc_on_friend_request_update_t cb,
                                                  void *ud);
+wfc_subscription_t *wfc_on_user_settings_update(wfc_on_user_settings_update_t cb,
+                                                void *ud);
 wfc_subscription_t *wfc_on_conference_event(wfc_on_conference_event_t cb, void *ud);
 
 /* Safe on NULL, safe from inside the callback being cancelled, and safe to

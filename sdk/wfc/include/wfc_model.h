@@ -244,6 +244,62 @@ typedef struct {
     int64_t update_dt;
 } wfc_friend_request_t;
 
+/* --------------------------------------------------- user settings */
+
+/* A user setting is (scope, key) -> value, and it is the one list on the
+ * server this client also WRITES to: UG pulls the whole of it, UP changes one
+ * entry, and every other device the account is logged in on sees the change.
+ * That is how "pin this conversation" is a property of the account rather
+ * than of the board.
+ *
+ * The key's meaning depends on the scope. For the two conversation scopes it
+ * is "type-line-target" (wfc_conversation_setting_key below); for a global
+ * switch it is empty. Values are strings on the wire even when they hold a
+ * number, so they are text here too -- "1", "0", a priority.
+ *
+ * Only the scopes this client acts on are named. Everything else the account
+ * has set still arrives, is stored, and comes back out of
+ * wfc_get_user_setting(): an application that knows what scope 6 means to it
+ * can read and write it without the component learning the name.
+ * userSettingScope.js has the full list. */
+#define WFC_SETTING_CONVERSATION_SILENT 1
+#define WFC_SETTING_GLOBAL_SILENT       2
+#define WFC_SETTING_CONVERSATION_TOP    3
+/* A deployment's own settings start here, so they cannot collide with a
+ * scope WFC adds later. */
+#define WFC_SETTING_CUSTOM_BEGIN        1000
+
+/* Passed to wfc_get_user_settings() to walk every scope. */
+#define WFC_SETTING_SCOPE_ANY (-1)
+
+/* Long enough for "1-0-<uid>", which is the longest key any scope uses, and
+ * for a value that is realistically a number or a short flag. Both are cut on
+ * a character boundary like every other stored string (wfc_copy_text). */
+#define WFC_SETTING_KEY_MAX   80
+#define WFC_SETTING_VALUE_MAX 64
+
+typedef struct {
+    int32_t scope;
+    char    key[WFC_SETTING_KEY_MAX];
+    char    value[WFC_SETTING_VALUE_MAX];
+    int64_t update_dt;
+} wfc_user_setting_t;
+
+/* The key the conversation scopes address a conversation by:
+ * "<type>-<line>-<target>", which is the order WFC.js, the mobile clients and
+ * the server all agree on. Getting the order wrong does not fail -- it writes
+ * a setting nobody reads and silently loses the one that was there. Always
+ * NUL-terminates.
+ *
+ * The two are a pair and are used from both sides of the client -- the store
+ * projects a setting onto a conversation row, the state machine writes one --
+ * so they live here rather than in either. The reverse answers false for a
+ * key that is not a conversation, which happens: a scope this client does not
+ * know keys its rows however it likes. */
+void wfc_conversation_setting_key(const wfc_conversation_t *conv, char *buf,
+                                  size_t buf_size);
+bool wfc_conversation_from_setting_key(const char *key, wfc_conversation_t *out);
+
 /* ---------------------------------------------------------- conversations */
 
 /* One row of the conversation list: a conversation, when it last had traffic,
@@ -257,7 +313,13 @@ typedef struct {
  *
  * `unread_mention` counts separately from `unread` and is NOT included in it,
  * matching UnreadCount in every other client: a badge shows the sum, an
- * "@ me" marker shows just the mentions. */
+ * "@ me" marker shows just the mentions.
+ *
+ * `top` and `silent` are the exception to "a projection of the message
+ * table": they come from the account's user settings, not from anything that
+ * arrived in this conversation. They are copied onto the row because that is
+ * where they are read -- the list sorts on `top` -- and the store keeps them
+ * in step with the setting table at the one point settings arrive. */
 #define WFC_DIGEST_MAX 96
 
 typedef struct {
@@ -270,6 +332,14 @@ typedef struct {
     int32_t            last_direction;   /* wfc_direction_t */
     char               last_from[WFC_TARGET_MAX];
     char               digest[WFC_DIGEST_MAX];
+    /* Pinned: 0 is not, and a larger number sorts above a smaller one. WFC
+     * carries a number rather than a flag so a client can offer levels; this
+     * one only ever writes 1, and honours whatever another client wrote. */
+    int32_t            top;
+    /* Muted. The unread count still grows -- muting stops the alert, not the
+     * bookkeeping -- so it is the badge's colour that changes, not its
+     * value. */
+    bool               silent;
 } wfc_conversation_info_t;
 
 static inline uint32_t wfc_conversation_unread_total(const wfc_conversation_info_t *info)

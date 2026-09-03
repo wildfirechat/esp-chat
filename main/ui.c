@@ -643,6 +643,17 @@ static void on_friends(size_t n, void *ud)
     ui_dirty(UI_DIRTY_FRIENDS | UI_DIRTY_NAMES);
 }
 
+/* The account's settings changed -- here or on the phone. Both conversation
+ * scopes also raise a conversation-update, which is what actually redraws the
+ * list; this is for the scopes nothing on this board draws, so that a setting
+ * arriving is visible on the 日志 page rather than only in the store. */
+static void on_user_settings(size_t n, void *ud)
+{
+    (void)ud;
+    ESP_LOGI(TAG, "user settings: %u entr%s", (unsigned)n, n == 1 ? "y" : "ies");
+    ui_dirty(UI_DIRTY_CONVS);
+}
+
 static void subscribe_all(void)
 {
     wfc_on_connection_status(on_connection_status, NULL);
@@ -654,6 +665,7 @@ static void subscribe_all(void)
     wfc_on_group_infos_update(on_group_infos, NULL);
     wfc_on_group_members_update(on_group_members, NULL);
     wfc_on_friend_list_update(on_friends, NULL);
+    wfc_on_user_settings_update(on_user_settings, NULL);
 
     /* The call page subscribes itself, because its events are the only ones
      * whose types come from the AV SDK -- and the AV SDK is optional

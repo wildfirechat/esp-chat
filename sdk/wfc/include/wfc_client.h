@@ -359,6 +359,40 @@ bool wfc_is_friend(const char *user_id);
 esp_err_t wfc_get_friend_requests(size_t limit, wfc_store_friend_request_cb_t cb,
                                   void *ud);
 
+/* --------------------------------------------------------- user settings */
+
+/* The account's settings, which are the account's and not the board's: what
+ * it has pinned, what it has muted, and whatever else the phone or the
+ * desktop client has set. UG pulls them, UP changes one, and every device
+ * logged in sees the change.
+ *
+ * Reads answer from the store and never fetch, like every other read here.
+ * A setting that has never been set is simply absent -- false, and `buf`
+ * empty -- which is how a default reaches the caller with no second path.
+ *
+ * The write does not wait: it sends and returns, and the local row appears
+ * when the server acknowledges it, at which point a user-settings-update
+ * event says so. A rejected change therefore does nothing at all, which is
+ * the honest outcome -- a screen that showed it and then took it back would
+ * be worse. ESP_OK here means "sent", not "set".
+ *
+ * NOT safe from an LVGL callback: it reaches a blocking send() on the long
+ * link (see the threading note in ui_page.h on the application side). */
+bool wfc_get_user_setting(int32_t scope, const char *key, char *buf, size_t buf_size);
+
+esp_err_t wfc_get_user_settings(int32_t scope, size_t limit,
+                                wfc_store_user_setting_cb_t cb, void *ud);
+
+esp_err_t wfc_set_user_setting(int32_t scope, const char *key, const char *value);
+
+/* Pinned and muted, the two settings that are about a conversation. Both go
+ * through wfc_set_user_setting() with the key WFC builds from (type, line,
+ * target); the conversation's row picks the change up when the server
+ * acknowledges it, and the list re-sorts on the conversation-update event
+ * that follows. Same threading rule as above. */
+esp_err_t wfc_set_conversation_top(const wfc_conversation_t *conv, bool top);
+esp_err_t wfc_set_conversation_silent(const wfc_conversation_t *conv, bool silent);
+
 #ifdef __cplusplus
 }
 #endif

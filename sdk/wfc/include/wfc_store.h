@@ -36,8 +36,9 @@
  * callback is valid for that call only.
  *
  * Everything else here -- conversations, users, groups, members, friends,
- * friend requests -- is copied in and copied out, so those callers own what
- * they get and can keep it. See the lifetime note in wfc_model.h for why the two differ.
+ * friend requests, user settings -- is copied in and copied out, so those
+ * callers own what they get and can keep it. See the lifetime note in
+ * wfc_model.h for why the two differ.
  */
 
 #ifndef WFC_STORE_H
@@ -93,11 +94,18 @@ esp_err_t wfc_store_clear(void);
  * holding one across a reboot is what turns a reconnect into a delta instead
  * of a re-download -- the whole point of P3.
  *
- * P3 wrote only WFC_KEY_MSG_HEAD; P4 added WFC_KEY_FRIEND_HEAD, and
- * WFC_KEY_FRIEND_RQ_HEAD came with FRP. The rest are named here because they
- * arrive in the same CONNACK (wfc_mqtt.h) and belong to lists this client
- * does not sync yet -- user settings and the two receipt lists, both
- * second-phase (ASSESSMENT.md section 7). */
+ * P3 wrote only WFC_KEY_MSG_HEAD; P4 added WFC_KEY_FRIEND_HEAD,
+ * WFC_KEY_FRIEND_RQ_HEAD came with FRP and WFC_KEY_SETTING_HEAD with UG.
+ * Those three are one mechanism written once -- see the sync table in
+ * wfc_impl.c -- and the version each asks from is THIS key and nothing else.
+ * It is not recomputed from the rows: user settings are a list this client
+ * also writes to, so the newest update_dt in the table can be a stamp we put
+ * there ourselves, which would run the head past the server's and skip
+ * whatever another device changed in between.
+ *
+ * The last two are named here because they arrive in the same CONNACK
+ * (wfc_mqtt.h) and belong to lists this client does not sync yet -- the two
+ * receipt lists (ASSESSMENT.md section 7). */
 #define WFC_KEY_MSG_HEAD        "msg_head"
 #define WFC_KEY_FRIEND_HEAD     "friend_head"
 #define WFC_KEY_FRIEND_RQ_HEAD  "friend_rq_head"
@@ -263,9 +271,9 @@ int64_t wfc_store_group_member_max_dt(const char *group_id);
 
 /* --------------------------------------------------------------- friends */
 
-/* Same shape as the group members: FP answers with everything changed since
- * the version we sent, ended relationships included, and the newest update_dt
- * in the table is the version to send next time. */
+/* FP answers with everything changed since the version we sent, ended
+ * relationships included. Unlike the group members below, the version to send
+ * next time is not derived from these rows -- it is WFC_KEY_FRIEND_HEAD. */
 esp_err_t wfc_store_put_friends(const wfc_friend_t *friends, size_t n);
 
 bool wfc_store_get_friend(const char *user_id, wfc_friend_t *out);
@@ -276,14 +284,12 @@ typedef bool (*wfc_store_friend_cb_t)(const wfc_friend_t *entry, void *ud);
  * FP does not re-deliver them, not so they can be listed. */
 esp_err_t wfc_store_query_friends(size_t limit, wfc_store_friend_cb_t cb, void *ud);
 
-int64_t wfc_store_friend_max_dt(void);
-
 /* -------------------------------------------------------- friend requests */
 
 /* FRP behaves exactly like FP: everything changed since the version we sent,
- * answered requests included, and the newest update_dt held is the version to
- * send next time. A request is keyed on the pair (from_uid, to_uid) -- the
- * same two people can have one outstanding in each direction. */
+ * answered requests included. A request is keyed on the pair
+ * (from_uid, to_uid) -- the same two people can have one outstanding in each
+ * direction. */
 esp_err_t wfc_store_put_friend_requests(const wfc_friend_request_t *requests, size_t n);
 
 typedef bool (*wfc_store_friend_request_cb_t)(const wfc_friend_request_t *entry,
@@ -296,7 +302,33 @@ typedef bool (*wfc_store_friend_request_cb_t)(const wfc_friend_request_t *entry,
 esp_err_t wfc_store_query_friend_requests(size_t limit,
                                           wfc_store_friend_request_cb_t cb, void *ud);
 
-int64_t wfc_store_friend_request_max_dt(void);
+/* --------------------------------------------------------- user settings */
+
+/* The third head-driven list, and the only one with a write path: UG fills
+ * this table, UP adds one row to it, and both go through here.
+ *
+ * Rows are keyed on (scope, key) and are kept whatever their scope, including
+ * the ones this client has no idea about -- they belong to the account, not
+ * to the board, and a client that dropped them would show a different picture
+ * from the phone next to it after a round trip.
+ *
+ * Two conversation scopes are more than storage: putting a
+ * WFC_SETTING_CONVERSATION_TOP or _SILENT row updates the conversation row it
+ * names, the same way putting a message does. That is why the projection
+ * lives here rather than in the business layer -- one place, both backends,
+ * and the list cannot disagree with the settings that produced it. */
+esp_err_t wfc_store_put_user_settings(const wfc_user_setting_t *settings, size_t n);
+
+/* False when the account has no such setting, leaving `out` untouched. */
+bool wfc_store_get_user_setting(int32_t scope, const char *key,
+                                wfc_user_setting_t *out);
+
+typedef bool (*wfc_store_user_setting_cb_t)(const wfc_user_setting_t *entry, void *ud);
+
+/* Every setting in `scope`, or every setting held when `scope` is
+ * WFC_SETTING_SCOPE_ANY. In cache order, like the friends query. */
+esp_err_t wfc_store_query_user_settings(int32_t scope, size_t limit,
+                                        wfc_store_user_setting_cb_t cb, void *ud);
 
 #ifdef __cplusplus
 }

@@ -1,0 +1,27 @@
+dependencies:
+  idf: ">=5.3"
+
+  # The call control messages are JSON (raw, not base64 -- see wfav_msg.h),
+  # and IDF v6 no longer ships a built-in "json" component: cJSON moved out to
+  # the registry. It happens to arrive anyway through esp-box-3 -> esp-sr, but
+  # a dependency that is only there by accident is one upstream bump away from
+  # not being there.
+  espressif/cjson: "^1.7.0"
+
+  # The WebRTC stack: ICE, DTLS, SRTP, RTP. Signalling is deliberately not
+  # part of it -- that is what wfav_session.c is, against WFC's CONF topic.
+  espressif/esp_peer: "^1.5.0"
+
+  # The capture pipeline: the ES7210 on this BSP's two-slot I2S, acoustic echo
+  # cancellation, and the Opus encoder. AEC is not optional on a speakerphone,
+  # and what it gets as a reference is not a loopback -- see wfav_audio.h.
+  espressif/esp_capture: "^1.0.0"
+
+  # The Opus decoder for the receiving side. The encoder comes with
+  # esp_capture; this is the other half.
+  #
+  # Pinned to 2.5.x, not to the newest: esp_capture pulls in gmf_audio, which
+  # requires esp_audio_codec ~2.5, and asking for ^2.6 here makes the solver
+  # fail outright rather than pick something. The decoder API this uses
+  # (esp_audio_dec_* plus esp_opus_dec_cfg_t) is the same in both.
+  espressif/esp_audio_codec: "~2.5"

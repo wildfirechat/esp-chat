@@ -1,0 +1,150 @@
+menu "Chat app"
+
+    config APP_CALL
+        bool "Voice calls"
+        default y
+        help
+            Whether this build can place and take voice calls.
+
+            Calls are the AV SDK in ../wfav-esp, which is a separate module on
+            purpose. Turning this off compiles main/ui_call_none.c instead of
+            main/ui_call.c, so nothing calls into wfav and the whole WebRTC
+            stack -- esp_peer, esp_capture, the Opus codecs, the AFE -- is
+            dropped at link time: 2.4 MB of image rather than 4.9 MB. The chat
+            page then has no phone button, and an invite arrives at a board
+            that is not listening for one, which looks to the caller exactly
+            like a board that is switched off.
+
+            The SDK is still compiled in that case, just not linked. To leave
+            it out of the build entirely, and skip downloading its managed
+            components, do not have ../wfav-esp checked out at all -- then this
+            has to be n, and the build says so if it is not.
+
+    config APP_TURN_URL
+        string "TURN/STUN server, overriding the AV SDK's own"
+        depends on APP_CALL
+        default ""
+        help
+            The relay a call's media goes through, for a deployment that runs
+            its own. WFC does not hand this out at connect time -- it is client
+            configuration, the same Config.ICE_SERVERS the web client reads.
+
+            The AV SDK has its own default for this (CONFIG_WFAV_TURN_URL,
+            wildfirechat.net's). Leave this empty and that one is used, which
+            is the right thing for a board talking to the public deployment.
+
+            It is here as well, and not only in the SDK, because the SDK is not
+            always source: a build against a packaged libwfav.a has the SDK's
+            Kconfig compiled into it and cannot change it. TURN is deployment
+            configuration rather than SDK configuration, so the application
+            gets the last word -- main/ui_call.c passes this to
+            wfav_engine_start() and it wins over whatever the SDK was built
+            with.
+
+            Set the username and password below with it. A wrong or
+            unreachable TURN server does not fail here; it fails as a call that
+            rings, connects nothing and reports a media error.
+
+    config APP_TURN_USER
+        string "TURN username"
+        depends on APP_CALL
+        default ""
+        help
+            Only read when APP_TURN_URL is not empty.
+
+    config APP_TURN_PASSWORD
+        string "TURN password"
+        depends on APP_CALL
+        default ""
+        help
+            Only read when APP_TURN_URL is not empty. A credential: put it in
+            sdkconfig.local, not here.
+
+    config APP_WIFI_SSID
+        string "WiFi SSID"
+        default ""
+        help
+            Set this in sdkconfig.local, which is gitignored. Empty here on
+            purpose so a fresh checkout fails loudly instead of trying to
+            associate with someone else's network.
+
+    config APP_WIFI_PASSWORD
+        string "WiFi password"
+        default ""
+
+    config APP_SNTP_SERVER
+        string "SNTP server"
+        default "ntp.aliyun.com"
+        help
+            The clock is not optional here. Every encrypted payload carries an
+            "hours since 2018-01-01" prefix that the server checks, so the app
+            waits for a real time sync before it will talk to the IM server --
+            there is no uptime fallback like mqtt_box has.
+
+    config APP_TIMEZONE
+        string "POSIX timezone"
+        default "CST-8"
+
+    config WFC_HOST
+        string "IM server host"
+        default "wildfirechat.net"
+        help
+            The name the deployment knows itself by. It is sent inside the
+            route request (root-key encrypted) and later forms the MQTT
+            will-topic, so a mismatch here fails at CONNECT, not at /route.
+
+    config WFC_ROUTE_PORT
+        int "Route HTTP port"
+        default 80
+        range 1 65535
+
+    config WFC_USER_ID
+        string "User ID"
+        default ""
+        help
+            Set this in sdkconfig.local together with the client ID and token.
+
+    config WFC_CLIENT_ID
+        string "Client ID"
+        default ""
+        help
+            The token is issued FOR a specific client ID -- pairing a token
+            with any other client ID fails /route with status 1
+            (kEcServerSecrectKeyMismatch). This is the single easiest thing to
+            get wrong when bringing a new board up.
+
+            Leave empty to derive a stable ID from the WiFi MAC (decision D2),
+            which is what a real deployment wants; but a MAC-derived ID will
+            not work with a token minted for a different one.
+
+    config WFC_TOKEN
+        string "App-server token"
+        default ""
+        help
+            The base64 blob the app server returns. It decrypts (root key) to
+            userToken|privateSecret|dbSecret. Treat it as a credential: put it
+            in sdkconfig.local, not here.
+
+            The token also carries a platform, and the server keeps it on the
+            session. It has to match WFC_PLATFORM in wfc_platform.h, which is
+            a native platform on purpose -- ask for the token accordingly. A
+            token issued for the Web platform will route, but /route will then
+            hand back a WebSocket port this client cannot speak.
+
+    config WFC_PULL_HISTORY
+        bool "Pull message history on first connect"
+        default n
+        help
+            Only consulted when the local store has no head yet: a first boot,
+            a store wiped because the account changed, or any boot at all with
+            CONFIG_WFC_STORE_RAM. With a head in the store the client resumes
+            from it and this setting does not come up.
+
+            n starts at the head the CONNACK reports: only messages sent from
+            now on arrive. y starts at 0 and pulls whatever roaming history
+            the server kept, which fills the screen without waiting for
+            someone to type -- useful while bringing a board up. Bounded by
+            the pull-round limit in wfc_impl.c either way, so a busy account
+            cannot pull forever.
+
+endmenu

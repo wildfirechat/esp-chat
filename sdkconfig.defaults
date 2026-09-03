@@ -1,0 +1,137 @@
+CONFIG_IDF_TARGET="esp32s3"
+
+# 16 MB flash / octal PSRAM (ESP32-S3-WROOM-1 N16R8 on ESP32-S3-BOX-3)
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_FREERTOS_HZ=1000
+
+# pbc registers the 13.5 KB descriptor set on the main task and uses alloca()
+# while walking it; the 3.5 KB default is not enough headroom for that plus the
+# route exchange running on the same stack.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# --- app settings (see main/Kconfig.projbuild) ---
+# WiFi credentials and the WFC account live in sdkconfig.local (gitignored).
+# Without that file the build still compiles but stops at startup with a
+# "not configured" message.
+CONFIG_APP_SNTP_SERVER="ntp.aliyun.com"
+CONFIG_APP_TIMEZONE="CST-8"
+CONFIG_WFC_HOST="wildfirechat.net"
+CONFIG_WFC_ROUTE_PORT=80
+
+# --- display ---
+# The BSP drives the panel in RGB565; the draw buffer height is the BSP default
+# and is what mqtt_box runs with.
+CONFIG_LV_COLOR_DEPTH_16=y
+CONFIG_BSP_LCD_DRAW_BUF_HEIGHT=100
+
+# LVGL allocates from PSRAM, through main/ui_lv_mem.c. Its built-in allocator
+# is a fixed array -- CONFIG_LV_MEM_SIZE_KILOBYTES, 64 KB -- which lands in
+# .bss, and .bss is internal SRAM; that reservation is paid whether LVGL uses
+# it or not. Internal SRAM is what this board runs out of, twice over: at boot
+# esp_wifi_init() failed with ESP_ERR_NO_MEM ("Expected to init 16 rx buffer,
+# actual is 13") into a boot loop, and at call time the AEC could not create
+# its 8 KB internal-stack init task ("Error create task afe_open in RAM").
+#
+# CONFIG_LV_USE_CLIB_MALLOC was the first attempt and only half worked: it
+# returns the static 64 KB, but SPIRAM_MALLOC_ALWAYSINTERNAL keeps everything
+# under 256 bytes internal, and a widget tree is mostly small allocations. The
+# custom allocator names PSRAM explicitly instead. See ui_lv_mem.c for why
+# that is safe -- nothing LVGL allocates is DMA'd.
+CONFIG_LV_USE_CUSTOM_MALLOC=y
+
+# --- text ---
+# P2 through P4 used LVGL's built-in Source Han Sans SC. P5 does not: it is a
+# fixed ~1100 character subset chosen for LVGL's demos, and characters outside
+# it draw as nothing at all -- the 会话 tab was rendering as 会. The font is
+# now components/wfc_font/ (Noto Sans SC, GB2312 level 1, ~480 KB), installed
+# as the theme font in ui_init() rather than as LV_FONT_DEFAULT. Run
+# tools/check_font.py before adding a Chinese string to the sources.
+# CONFIG_LV_FONT_SOURCE_HAN_SANS_SC_16_CJK is not set
+CONFIG_LV_FONT_MONTSERRAT_12=y
+CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=y
+
+# Chinese input. LVGL's pinyin IME with our own dictionary: the built-in one is
+# 321 syllables of traditional Chinese ("xie" offers 謝), so it is switched off
+# and main/ui_pinyin_dict.c supplies GB2312 level 1 instead, ordered by
+# character frequency. See tools/make_pinyin.py.
+CONFIG_LV_USE_IME_PINYIN=y
+# CONFIG_LV_IME_PINYIN_USE_DEFAULT_DICT is not set
+CONFIG_LV_IME_PINYIN_CAND_TEXT_NUM=6
+
+# LVGL's own diagnostics. Off by default, and that default cost a day: LVGL's
+# assert handler is `while(1);`, so a failed allocation does not crash, it
+# parks the calling task forever -- and if that task is holding the display
+# lock, the panel freezes with no message anywhere. With the log on, the
+# assert at least says what it was.
+CONFIG_LV_USE_LOG=y
+CONFIG_LV_LOG_LEVEL_WARN=y
+CONFIG_LV_LOG_PRINTF=y
+
+# --- audio / video calls (wfav-esp) ---
+# DTLS-SRTP, which esp_peer needs and IDF does not enable by default. Without
+# these three the media never gets past the handshake, and the failure reads as
+# an ICE problem rather than as a missing cipher.
+CONFIG_MBEDTLS_SSL_PROTO_DTLS=y
+CONFIG_MBEDTLS_SSL_DTLS_SRTP=y
+CONFIG_MBEDTLS_X509_CREATE_C=y
+
+# Opus in both directions. The encoder comes with esp_capture, the decoder with
+# esp_audio_codec, and both are off by default -- and Opus is not optional:
+# janus.plugin.videoroom's audiocodec defaults to opus and WFC's room creation
+# cannot override it (ASSESSMENT.md risk R6).
+CONFIG_AUDIO_ENCODER_OPUS_SUPPORT=y
+CONFIG_AUDIO_DECODER_OPUS_SUPPORT=y
+
+# esp_capture builds its video half by default, which pulls in encoders this
+# board has no camera to feed. Audio only.
+CONFIG_ESP_CAPTURE_ENABLE_AUDIO=y
+# CONFIG_ESP_CAPTURE_ENABLE_VIDEO is not set
+
+# Internal SRAM is the scarce pool once WiFi, DTLS and I2S DMA are all live at
+# once during a call, so mbedTLS is pushed out to PSRAM and lwIP/WiFi are
+# allowed to follow. The 256-byte floor keeps small allocations internal, where
+# the fragmentation cost of PSRAM would outweigh the space.
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=256
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+
+# The rest of this block is about one allocation: esp_capture opens the AEC on
+# a task whose 8 KB stack must be internal (CAPTURE_RUN_SYNC_IN_RAM -- it only
+# spawns that task because the GMF task calling it already runs on a PSRAM
+# stack). That allocation failing is what a call looks like when it dies:
+#
+#   ESP_GMF_THREAD: Error create task  afe_open in RAM
+#   AUD_AEC_SRC: Failed to open AFE
+#   wfav_call: the audio path would not come up
+#
+# Two levers, both aimed at internal SRAM specifically:
+#
+# The reserve is internal memory that malloc() will not hand to an allocation
+# that could have lived in PSRAM, so it stays available to the ones that
+# cannot -- DMA descriptors and task stacks, which is exactly what the AEC
+# needs. 32 KB was not enough headroom once WiFi, the codec devices and the
+# Opus encoder had all taken their share.
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536
+
+# WiFi's static buffers are ~1.6 KB each and have to be internal and
+# DMA-capable, so 16 + 16 of them is ~50 KB of the scarce pool held for the
+# life of the program. This board carries IM traffic and one 16 kHz Opus
+# stream, not bulk transfer; the counts come down rather than the type, since
+# IDF wants static TX buffers whenever PSRAM is enabled.
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10
+CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=8
+
+# Opus and the AEC are the two things on this board that are measured in
+# percent of a core rather than in milliseconds.
+CONFIG_COMPILER_OPTIMIZATION_PERF=y

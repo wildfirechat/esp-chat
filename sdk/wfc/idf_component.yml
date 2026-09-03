@@ -1,0 +1,5 @@
+dependencies:
+  # A PUBACK whose error code is 255 carries a deflated payload (risk R1). The
+  # other clients inflate it with zlib at windowBits 15+32 -- proto2 through
+  # gzip-hpp, WFC.js through pako -- and there is no zlib in IDF itself.
+  espressif/zlib: "^1.3.0"

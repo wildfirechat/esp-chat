@@ -1,0 +1,6 @@
+dependencies:
+  idf: ">=5.3"
+  # The board support package: LCD, touch and the LVGL port. P2 is the first
+  # milestone with a screen -- the same BSP mqtt_box uses, so the display code
+  # carries over.
+  espressif/esp-box-3: "^3.2.0"

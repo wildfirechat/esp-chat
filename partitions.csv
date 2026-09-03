@@ -1,0 +1,18 @@
+# Cut for where this project ends up, not where it is today (ASSESSMENT.md 10.4).
+#
+# P0 needs none of this -- the app is a few hundred KB and touches only NVS.
+# But changing the partition table later means a full erase and reflash, which
+# throws away the NVS token and the SQLite database. So the OTA-capable layout
+# goes in now, sized for the audio-call build (~3.0-3.6 MB) rather than for the
+# protocol demo.
+#
+# storage/ is the FATFS volume P3 puts the SQLite database on. Nothing mounts
+# it yet.
+#
+# Name,     Type, SubType, Offset,  Size,  Flags
+nvs,        data, nvs,     ,        24K,
+otadata,    data, ota,     ,        8K,
+phy_init,   data, phy,     ,        4K,
+ota_0,      app,  ota_0,   ,        5M,
+ota_1,      app,  ota_1,   ,        5M,
+storage,    data, fat,     ,        5800K,

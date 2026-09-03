@@ -4,3 +4,7 @@ dependencies:
   # milestone with a screen -- the same BSP mqtt_box uses, so the display code
   # carries over.
   espressif/esp-box-3: "^3.2.0"
+  # TJpgDec, packaged. The chat page decodes received pictures with it --
+  # RGB565 straight out and 1/2..1/8 descaling during the decode, both turned
+  # on in sdkconfig.defaults (a full-size phone photo is 24 MB decoded).
+  espressif/esp_jpeg: "^1.1.0"

@@ -154,6 +154,23 @@ typedef bool (*wfc_store_message_cb_t)(const wfc_message_t *msg, void *ud);
 esp_err_t wfc_store_query_messages(const wfc_conversation_t *conv, size_t limit,
                                    wfc_store_message_cb_t cb, void *ud);
 
+/* One message by its server UID. False when nothing is held under it, in
+ * which case `cb` is not called; `cb` runs at most once, so its return value
+ * is ignored.
+ *
+ * The counterpart to wfc_store_has_message(), which asks the same question
+ * about the same unique index and answers only yes or no. A caller that held
+ * on to a UID -- and a UID is the one thing about a message that is worth
+ * holding on to, being stable across repaints and across a reboot -- should
+ * not have to walk a conversation to find the row again.
+ *
+ * `msg` BORROWS, exactly as it does in a walk: every string dies with the
+ * callback (wfc_model.h), so this is where anything worth keeping is copied.
+ * That is what makes this the right way to reach a field too long to cache --
+ * a media URL is up to CONFIG_WFC_STORE_MAX_TEXT and the store is where the
+ * whole of it lives. */
+bool wfc_store_get_message(int64_t message_uid, wfc_store_message_cb_t cb, void *ud);
+
 /* ----------------------------------------------------------- conversations */
 
 /* The conversation list is not a thing callers maintain: it is a projection

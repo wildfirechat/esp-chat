@@ -1,10 +1,10 @@
 /* Custom messages: what the rest of the application needs to know.
  *
- * Four functions, and three of them are seams the chat page calls without
- * knowing what is behind them. Adding a message type touches this directory
- * and nothing else -- that is the point of the directory, and it is why the
+ * Three functions, and one of them is the seam the chat page calls without
+ * knowing what is behind it. Adding a message type touches this directory and
+ * nothing else -- that is the point of the directory, and it is why the
  * client component has a type table instead of a switch statement
- * (wfc_content.h).
+ * (wfc_content.h), and why the screen has one too (../ui_msg_view.h).
  *
  * The web client's src/wfc_custom_message/ is the same five steps in the same
  * order; README.md here maps one onto the other.
@@ -21,6 +21,8 @@
 #include "esp_err.h"
 
 #include "wfc_client.h"
+
+#include "ui_msg_view.h"
 
 #include "custom_message_type.h"
 
@@ -39,34 +41,21 @@ esp_err_t custom_message_send_test(const wfc_conversation_t *conv, const char *t
 esp_err_t custom_message_send_test_notification(const wfc_conversation_t *conv,
                                                 const char *tip);
 
-/* ------------------------------------------------------- drawing (seams) */
+/* -------------------------------------------------------- drawing (seam) */
 
-/* The line of text a chat bubble shows for this message. False means "no
- * opinion" and the page falls back to wfc_message_digest(), which is what
- * every registered type without its own view gets.
+/* This deployment's view for `type`, or NULL when it has none and the chat
+ * page should draw its ordinary bubble.
  *
- * Called while the store's message is still valid (inside the query
- * callback), so this is where a payload gets decoded -- afterwards there is
- * only the copy in the row. */
-bool custom_message_text(const wfc_message_t *msg, char *buf, size_t buf_size);
-
-/* One message as the chat page has it by drawing time: the payload is long
- * gone (it died with the store callback), so what a view gets is what
- * custom_message_text() put in `text` plus the envelope. A view that needs
- * more than this needs custom_message_text() to have kept it. */
-typedef struct {
-    int32_t     type;
-    const char *text;
-    const char *who;        /* the sender's display name, "" for our own */
-    int64_t     timestamp;
-    bool        mine;
-} custom_message_row_t;
-
-/* Draws the row into `parent`. False means "no opinion" and the page draws
- * its ordinary bubble.
+ * One function rather than the two the chat page used to call, because what a
+ * view is now lives in ../ui_msg_view.h: one draw(), on the UI task with the
+ * display lock held, drawing from the envelope the page hands it. A type that
+ * needs more than the envelope reads it back out of the store by
+ * row->message_uid, from prime(); nothing type-specific rides along in the
+ * row. That header is where the rule and the reasons are written down.
  *
- * Runs on the UI task with the display lock held: build widgets, read
- * nothing that can block, call nothing in wfc_client.h. */
-bool custom_message_draw(lv_obj_t *parent, const custom_message_row_t *row);
+ * Looked up BEFORE the built-in views, so registering type 3 here replaces
+ * the picture view the same way registering type 3 in the type table replaces
+ * its digest. */
+const ui_msg_view_t *custom_message_view(int32_t type);
 
 #endif /* CUSTOM_MESSAGE_H */

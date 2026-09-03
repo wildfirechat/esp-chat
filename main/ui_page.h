@@ -1,14 +1,16 @@
 /* What the pages and the shell agree on.
  *
- * The panel is five pages behind one header: three that are "home" and reached
- * from the nav bar, and two that are pushed on top of them and reached by
+ * The panel is a handful of pages behind one header: four that are "home" and
+ * reached from the nav bar, and the rest pushed on top of them and reached by
  * tapping something.
  *
- *   会话  the conversation list          home
- *   状态  what the board is doing        home
- *   日志  the message log                home
- *   chat  one conversation               pushed from 会话
- *   写    the composer                   pushed from chat
+ *   会话    the conversation list        home
+ *   联系人  the friend list              home
+ *   状态    what the board is doing      home
+ *   日志    the message log              home
+ *   chat    one conversation             pushed from 会话, or from a contact
+ *   写      the composer                 pushed from chat
+ *   contact one person                   pushed from 联系人
  *
  * A page is four functions and no state that outlives its widgets. create()
  * builds the tree, refresh() fills it from the store, destroy() forgets the
@@ -98,6 +100,8 @@
 #define UI_DIRTY_STATUS   (1u << 3)
 #define UI_DIRTY_LOG      (1u << 4)
 #define UI_DIRTY_CALL     (1u << 5)   /* a call started, changed state or ended */
+#define UI_DIRTY_FRIENDS  (1u << 6)   /* the friend list moved */
+#define UI_DIRTY_MEDIA    (1u << 7)   /* a picture finished loading */
 #define UI_DIRTY_ALL      0xFFFFFFFFu
 
 void ui_dirty(uint32_t bits);
@@ -106,9 +110,11 @@ void ui_dirty(uint32_t bits);
 
 typedef enum {
     UI_PAGE_CONVS = 0,
+    UI_PAGE_CONTACTS,
     UI_PAGE_STATUS,
     UI_PAGE_LOG,
     UI_PAGE_CHAT,
+    UI_PAGE_CONTACT,
     UI_PAGE_COMPOSE,
     UI_PAGE_CALL,
     UI_PAGE_COUNT,
@@ -140,14 +146,21 @@ ui_page_id_t ui_current_page(void);
 /* ------------------------------------------------------------- the pages */
 
 extern const ui_page_def_t ui_page_convs;
+extern const ui_page_def_t ui_page_contacts;
+extern const ui_page_def_t ui_page_contact;
 extern const ui_page_def_t ui_page_chat;
 extern const ui_page_def_t ui_page_compose;
 extern const ui_page_def_t ui_page_status;
 extern const ui_page_def_t ui_page_log;
 extern const ui_page_def_t ui_page_call;
 
-/* ui_convs.c -> ui_chat.c. Sets the conversation and navigates to it. */
+/* ui_convs.c -> ui_chat.c, and ui_contact.c -> ui_chat.c. Sets the
+ * conversation and navigates to it. */
 void ui_chat_open(const wfc_conversation_t *conv);
+
+/* ui_contacts.c -> ui_contact.c. A user ID is the whole of what the contact
+ * page is told; everything it draws it reads from the store itself. */
+void ui_contact_open(const char *user_id);
 
 /* ui_chat.c -> ui_compose.c. The composer is deliberately not told what a
  * conversation is: it collects text and hands it back. Voice, when it comes,

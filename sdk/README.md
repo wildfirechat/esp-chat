@@ -9,7 +9,7 @@
 
 | 模块 | 内容 | 归档 | 源码版本 |
 |---|---|---|---|
-| [wfc/](./wfc/) | IM 客户端：协议、存储、模型、事件 | `lib/libwfc.a` 2764 KB | 85b27ce 2026-09-02 |
+| [wfc/](./wfc/) | IM 客户端：协议、存储、模型、事件 | `lib/libwfc.a` 2767 KB | 38a26c5 2026-09-03 |
 | [wfav/](./wfav/) | 音视频 SDK：通话信令、WebRTC、Opus | `lib/libwfav.a` 214 KB | 85b27ce 2026-09-02 |
 
 ```
@@ -17,7 +17,7 @@ target      esp32s3
 IDF         v6.1.0
 打包日期     2026-09-03
 sha256
-    wfc   9fa8b02413c25e928098c848241802639381ed7c59e74b0101a2c939b4662cd1
+    wfc   50801775f7cb699e1f04f13f3c2caf759d565cffef86c1e2cbeeb0a2a4873106
     wfav  1fdd6363cdeb7e4001872343f6115a231e389fd00c0803395f29b3712facfae9
 ```
 

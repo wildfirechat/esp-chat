@@ -4,9 +4,10 @@
  * Three things live here that nowhere else can own.
  *
  * The router. A page is created, filled, and deleted whole (ui_page.h); this
- * holds the two-deep stack that makes 会话 -> chat -> 写 work, and switching
- * happens on the UI task even when a button on the LVGL task asked for it,
- * so no page is ever deleted from inside its own event callback.
+ * holds the stack that makes 会话 -> chat -> 写 work, and 联系人 -> 一个联系人
+ * -> chat -> 写 with it, and switching happens on the UI task even when a
+ * button on the LVGL task asked for it, so no page is ever deleted from
+ * inside its own event callback.
  *
  * The repaint tick. Events arrive in bursts -- a catch-up delivers forty
  * messages, each one moving a conversation to the top of the list -- and
@@ -43,6 +44,8 @@
 #include "ui.h"
 #include "ui_page.h"
 #include "wfc_font.h"
+
+#include "ui_media.h"
 
 static const char *TAG = "ui";
 
@@ -85,25 +88,36 @@ static lv_obj_t *s_link_dot;
 static lv_obj_t *s_clock;
 static lv_obj_t *s_content;
 static lv_obj_t *s_navbar;
-static lv_obj_t *s_nav_btn[3];
+
+/* The home pages, in the order the bar shows them. */
+#define NAV_COUNT 4
+
+static lv_obj_t *s_nav_btn[NAV_COUNT];
 
 static const ui_page_def_t *s_def;
 static ui_page_id_t         s_page = UI_PAGE_CONVS;
 static ui_page_id_t         s_home = UI_PAGE_CONVS;
-static ui_page_id_t         s_stack[2];
+/* Deep enough for the longest path the pages can build: 联系人 -> a contact
+ * -> that contact's chat -> the composer, with a call able to arrive on top
+ * of any of them. */
+static ui_page_id_t         s_stack[4];
 static int                  s_depth;
 
 static const ui_page_def_t *const PAGES[UI_PAGE_COUNT] = {
-    [UI_PAGE_CONVS]   = &ui_page_convs,
-    [UI_PAGE_STATUS]  = &ui_page_status,
-    [UI_PAGE_LOG]     = &ui_page_log,
-    [UI_PAGE_CHAT]    = &ui_page_chat,
-    [UI_PAGE_COMPOSE] = &ui_page_compose,
-    [UI_PAGE_CALL]    = &ui_page_call,
+    [UI_PAGE_CONVS]    = &ui_page_convs,
+    [UI_PAGE_CONTACTS] = &ui_page_contacts,
+    [UI_PAGE_STATUS]   = &ui_page_status,
+    [UI_PAGE_LOG]      = &ui_page_log,
+    [UI_PAGE_CHAT]     = &ui_page_chat,
+    [UI_PAGE_CONTACT]  = &ui_page_contact,
+    [UI_PAGE_COMPOSE]  = &ui_page_compose,
+    [UI_PAGE_CALL]     = &ui_page_call,
 };
 
-static const char *const NAV_NAMES[3] = { "会话", "状态", "日志" };
-static const ui_page_id_t NAV_PAGES[3] = { UI_PAGE_CONVS, UI_PAGE_STATUS, UI_PAGE_LOG };
+static const char *const NAV_NAMES[NAV_COUNT] = { "会话", "联系人", "状态", "日志" };
+static const ui_page_id_t NAV_PAGES[NAV_COUNT] = {
+    UI_PAGE_CONVS, UI_PAGE_CONTACTS, UI_PAGE_STATUS, UI_PAGE_LOG,
+};
 
 /* ------------------------------------------------------------- helpers */
 
@@ -244,7 +258,7 @@ static void build_navbar(lv_obj_t *parent)
     lv_obj_set_style_border_width(s_navbar, 1, 0);
     lv_obj_set_flex_flow(s_navbar, LV_FLEX_FLOW_ROW);
 
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < NAV_COUNT; i++) {
         lv_obj_t *btn = lv_button_create(s_navbar);
 
         lv_obj_set_height(btn, LV_PCT(100));
@@ -290,7 +304,7 @@ static void apply_chrome(void)
         lv_obj_add_flag(s_navbar, LV_OBJ_FLAG_HIDDEN);
     }
 
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < NAV_COUNT; i++) {
         bool current = NAV_PAGES[i] == s_page;
 
         lv_obj_set_style_text_color(
@@ -624,7 +638,9 @@ static void on_friends(size_t n, void *ud)
 {
     (void)ud;
     ui_logf(UI_LOG_NOTE, "好友列表更新 %u 条", (unsigned)n);
-    ui_dirty(UI_DIRTY_NAMES);
+    /* Both bits: the list gained or lost a row, and an alias that changed is
+     * a name every page that draws one has to redraw. */
+    ui_dirty(UI_DIRTY_FRIENDS | UI_DIRTY_NAMES);
 }
 
 static void subscribe_all(void)
@@ -661,6 +677,10 @@ void ui_init(void)
      * theme: LVGL's built-in CJK font is a subset that cannot draw 会话 or
      * 状态, and installing ours theme-wide is what makes every widget --
      * including the keyboard's own labels -- inherit it. */
+    /* Cheap: the fetcher task itself is not created until a picture is
+     * actually looked at (ui_media.h). */
+    ui_media_start();
+
     lv_theme_t *theme = lv_theme_default_init(
         disp, lv_color_hex(UI_C_ACCENT), lv_color_hex(UI_C_DIM), true, &wfc_font_16);
     lv_display_set_theme(disp, theme);

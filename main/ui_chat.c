@@ -11,6 +11,12 @@
  * different page with the same one-line contract, and this file does not
  * change.
  *
+ * Drawing is not all done here either. This file knows two shapes -- a bubble
+ * and a centred notice -- and everything else is a view, looked up by content
+ * type in ui_msg_view.h. The row this page keeps is the envelope and nothing
+ * else: a view that needs more than the envelope reads it back out of the
+ * store, by message_uid, from prime().
+ *
  * Opening the conversation marks it read, which is what every client does and
  * what makes the unread badge mean something. It is local only -- telling the
  * server is the read-receipt path, which needs the receipt feature bit and is
@@ -21,7 +27,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "ui_media.h"
 #include "ui_page.h"
+#include "ui_msg_view.h"
 #include "wfc_mem.h"
 
 #include "custom_message.h"
@@ -30,21 +38,10 @@
  * this is "enough to scroll through", not "the whole history" -- and it is
  * re-read on every repaint, so it wants to stay cheap. */
 #define MSG_MAX  30
-#define TEXT_MAX 192
 
 /* Room for the longest thing the composer will hand over, so parking it
  * never has to cut a character in half. */
 #define PENDING_MAX 256
-
-typedef struct {
-    char    who[WFC_NAME_MAX];
-    char    text[TEXT_MAX];
-    char    from[WFC_TARGET_MAX];
-    int64_t timestamp;
-    int32_t type;     /* the content type, for a view of its own */
-    bool    mine;
-    bool    notice;   /* a group notification or a tip: centred, not a bubble */
-} msg_row_t;
 
 static wfc_conversation_t s_conv;
 static lv_obj_t          *s_msgs;
@@ -54,7 +51,7 @@ static lv_obj_t          *s_input_label;
  * button that always declines is worse than no button. */
 static lv_obj_t          *s_call;
 static lv_obj_t          *s_call_label;
-static msg_row_t         *s_rows;      /* MSG_MAX of them, in PSRAM */
+static ui_msg_row_t      *s_rows;      /* MSG_MAX of them, in PSRAM */
 static size_t             s_count;
 /* Written by the composer's callback, drained by prime(). */
 static char               s_pending[PENDING_MAX];
@@ -67,30 +64,27 @@ static bool collect(const wfc_message_t *msg, void *ud)
 {
     (void)ud;
 
-    msg_row_t *row = &s_rows[MSG_MAX - 1 - s_count];
+    ui_msg_row_t *row = &s_rows[MSG_MAX - 1 - s_count];
 
-    row->mine      = msg->direction == WFC_DIRECTION_SEND;
-    row->timestamp = msg->timestamp;
-    row->type      = msg->content.type;
+    row->mine        = msg->direction == WFC_DIRECTION_SEND;
+    row->timestamp   = msg->timestamp;
+    row->message_uid = msg->message_uid;
+    row->type        = msg->content.type;
+    row->group       = s_conv.type == WFC_CONV_GROUP;
     /* Asked of the type table rather than tested against type numbers here:
      * a custom type registered as a notification is centred like the built-in
      * ones, and this page does not have to learn about it. */
-    row->notice    = wfc_content_is_notification(msg->content.type);
+    row->notice      = wfc_content_is_notification(msg->content.type);
 
     strlcpy(row->from, row->mine ? "" : msg->from, sizeof(row->from));
     wfc_get_display_name(row->mine ? wfc_client_user_id() : msg->from,
-                         s_conv.type == WFC_CONV_GROUP ? s_conv.target : NULL,
+                         row->group ? s_conv.target : NULL,
                          row->who, sizeof(row->who));
-    /* The application's own types get first refusal -- this is the one moment
-     * the payload is still there to decode (custom_message.h) -- and anything
-     * that declines falls back to the digest the conversation list uses.
-     *
-     * Both write into the row rather than returning a pointer: cutting a
-     * Chinese character in half leaves the panel drawing the remains as a
-     * gap, so the copy has to be the one that knows the buffer's size. */
-    if (!custom_message_text(msg, row->text, sizeof(row->text))) {
-        wfc_message_digest(msg, row->text, sizeof(row->text));
-    }
+    /* The one line of text every row has, and the same one the conversation
+     * list shows. A type that wants different words changes its digest
+     * (wfc_content.h); a type that wants to look different gets a view
+     * (ui_msg_view.h). Neither is this page's business. */
+    wfc_message_digest(msg, row->text, sizeof(row->text));
 
     return ++s_count < MSG_MAX;
 }
@@ -143,7 +137,7 @@ static void prime(void)
 
 /* --------------------------------------------------------------- drawing */
 
-static void draw_notice(const msg_row_t *row)
+static void draw_notice(const ui_msg_row_t *row)
 {
     lv_obj_t *label = lv_label_create(s_msgs);
 
@@ -158,21 +152,11 @@ static void draw_notice(const msg_row_t *row)
 /* `show_who` is false when the previous bubble was from the same person: a
  * run of messages from one sender reads better without their name over every
  * one of them. */
-static void draw_bubble(const msg_row_t *row, bool show_who)
+static void draw_bubble(const ui_msg_row_t *row, bool show_who)
 {
-    lv_obj_t *line = lv_obj_create(s_msgs);
+    lv_obj_t *line = ui_msg_line(s_msgs, row);
 
-    ui_style_flat(line);
-    lv_obj_set_size(line, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_opa(line, LV_OPA_TRANSP, 0);
-    lv_obj_set_flex_flow(line, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(line, 1, 0);
-    lv_obj_set_flex_align(line,
-                          LV_FLEX_ALIGN_START,
-                          row->mine ? LV_FLEX_ALIGN_END : LV_FLEX_ALIGN_START,
-                          row->mine ? LV_FLEX_ALIGN_END : LV_FLEX_ALIGN_START);
-
-    if (show_who && !row->mine && s_conv.type == WFC_CONV_GROUP) {
+    if (show_who && !row->mine && row->group) {
         lv_obj_t *who = lv_label_create(line);
 
         lv_obj_set_style_text_font(who, UI_FONT_SMALL, 0);
@@ -309,7 +293,8 @@ static void create(lv_obj_t *parent)
 
 static void refresh(uint32_t dirty)
 {
-    if ((dirty & (UI_DIRTY_MESSAGES | UI_DIRTY_NAMES | UI_DIRTY_CONVS)) == 0) {
+    if ((dirty & (UI_DIRTY_MESSAGES | UI_DIRTY_NAMES | UI_DIRTY_CONVS |
+                  UI_DIRTY_MEDIA)) == 0) {
         return;
     }
     if (s_rows == NULL) {
@@ -346,6 +331,18 @@ static void refresh(uint32_t dirty)
     wfc_get_messages(&s_conv, MSG_MAX, collect, NULL);
 
     lv_obj_clean(s_msgs);
+
+    /* Every widget that could have been holding a picture has just been
+     * deleted and none of the new ones exist yet, which is the one moment a
+     * picture may be freed (ui_media.h). What scrolled out of the window goes
+     * back to the heap here. */
+    int64_t on_screen[MSG_MAX];
+
+    for (size_t i = 0; i < s_count; i++) {
+        on_screen[i] = s_rows[MSG_MAX - s_count + i].message_uid;
+    }
+    ui_media_keep_only(on_screen, s_count);
+
     if (s_count == 0) {
         lv_obj_t *empty = ui_label(s_msgs, "还没有消息", UI_C_DIM);
 
@@ -353,28 +350,21 @@ static void refresh(uint32_t dirty)
         lv_obj_set_style_pad_all(empty, 12, 0);
     }
 
+    /* Three shapes, most specific first: a type with a view of its own draws
+     * itself, a type registered as a notification is a centred line, and
+     * everything else is a bubble. The run-of-messages rule is reset by the
+     * first two, since neither carries the sender's name the way a bubble
+     * does. */
     const char *previous = NULL;
     for (size_t i = MSG_MAX - s_count; i < MSG_MAX; i++) {
-        const msg_row_t *row = &s_rows[i];
+        const ui_msg_row_t *row = &s_rows[i];
 
-        if (row->notice) {
-            draw_notice(row);
+        if (ui_msg_view_draw(s_msgs, row)) {
             previous = NULL;
             continue;
         }
-        /* A type with a view of its own draws itself; everything else is a
-         * bubble. The run-of-messages rule is reset either way, since a
-         * custom card does not carry the sender's name the way a bubble
-         * does. */
-        const custom_message_row_t custom = {
-            .type      = row->type,
-            .text      = row->text,
-            .who       = row->who,
-            .timestamp = row->timestamp,
-            .mine      = row->mine,
-        };
-
-        if (custom_message_draw(s_msgs, &custom)) {
+        if (row->notice) {
+            draw_notice(row);
             previous = NULL;
             continue;
         }
@@ -392,6 +382,10 @@ static void refresh(uint32_t dirty)
 
 static void destroy(void)
 {
+    /* Leaving the conversation gives every picture back. The widgets holding
+     * them are deleted with the page, before this runs. */
+    ui_media_keep_only(NULL, 0);
+
     wfc_free(s_rows);
     s_rows        = NULL;
     s_msgs        = NULL;

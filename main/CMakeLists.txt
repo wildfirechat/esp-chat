@@ -1,5 +1,8 @@
 # ui.c is the shell; each ui_*.c after it is one page (see ui_page.h).
 # ui_lv_mem.c is not a page -- it is LVGL's allocator, moved to PSRAM.
+# ui_msg_view.c is not a page either -- it is the table saying which content
+# type is drawn by which view, and each ui_msg_*.c after it is one such view
+# (see ui_msg_view.h).
 # ui_pinyin_dict.c is generated -- tools/make_pinyin.py.
 # wfc_custom_message/ is this deployment's own message types, kept in a
 # directory of its own so a fork of it can be dropped in whole -- the same
@@ -8,7 +11,12 @@ set(app_srcs "app_main.c"
              "ui.c"
              "ui_lv_mem.c"
              "ui_convs.c"
+             "ui_contacts.c"
+             "ui_contact.c"
              "ui_chat.c"
+             "ui_msg_view.c"
+             "ui_msg_image.c"
+             "ui_media.c"
              "ui_compose.c"
              "ui_status.c"
              "ui_log.c"
@@ -17,7 +25,8 @@ set(app_srcs "app_main.c"
              "wfc_custom_message/custom_message_view.c")
 
 set(app_requires wfc wfc_font nvs_flash esp_wifi esp_netif
-                 esp_event esp_hw_support esp_timer)
+                 esp_event esp_hw_support esp_timer
+                 esp_http_client esp-tls espressif__esp_jpeg)
 
 # Voice calls, the one feature that can be left out. Same shape as the client's
 # two store backends (wfc-esp/components/wfc/CMakeLists.txt): one header, two

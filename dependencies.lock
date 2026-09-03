@@ -102,7 +102,7 @@ dependencies:
     - esp32s3
     version: 3.2.0
   espressif/esp-dl:
-    component_hash: f67408f364f2faa1178a5f0eb2f0fcdf504b68902fa4f3bcd6fa9f797e1ed623
+    component_hash: 233ee8d37dfedeb637fc74713b87bd861ac530cfbcc4c63c57c2e51064cdda31
     dependencies:
     - name: espressif/dl_fft
       registry_url: https://components.espressif.com
@@ -128,7 +128,7 @@ dependencies:
     - esp32s2
     - esp32s3
     - esp32s31
-    version: 3.3.10
+    version: 3.3.11
   espressif/esp-dsp:
     component_hash: 12e44db246517a627bc0fe2b255b8335410c0215c98bfba2df5a8e3edea839ef
     dependencies:
@@ -324,7 +324,7 @@ dependencies:
       require: private
       version: '>=5.0'
     source:
-      registry_url: https://components.espressif.com
+      registry_url: https://components.espressif.com/
       type: service
     version: 1.3.1
   espressif/esp_lcd_ili9341:
@@ -686,9 +686,10 @@ direct_dependencies:
 - espressif/esp-box-3
 - espressif/esp_audio_codec
 - espressif/esp_capture
+- espressif/esp_jpeg
 - espressif/esp_peer
 - espressif/zlib
 - idf
-manifest_hash: 32cdaf6644f2060ffba76c18173c4694e4a2c3a7a2ced6ff8f93e1da54720e15
+manifest_hash: fadfde28858575a96774e670a87af7bd851c21e4a6ca6ba6d0dd58fcba57089c
 target: esp32s3
 version: 3.0.0

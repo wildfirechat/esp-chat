@@ -1,76 +1,49 @@
 /* How a custom message looks on the panel.
  *
- * MessageContentContainerView.vue's job: the chat page draws a bubble for
- * anything it does not recognise, and this decides which types it does not
- * recognise. Two seams, because a message is drawn in two moments that are on
- * different tasks and have different things available:
+ * MessageContentContainerView.vue's half of the job: the chat page draws a
+ * bubble for anything it does not recognise, and this table decides which
+ * types it does not recognise. What a view IS -- one function, on the UI task
+ * with the display lock held, drawing from the envelope and nothing else --
+ * is ../ui_msg_view.h, and it is worth reading before adding one.
  *
- *   custom_message_text()  runs inside the store query, where the message and
- *                          its payload are still there. Anything that has to
- *                          be decoded is decoded here.
- *   custom_message_draw()  runs on the UI task with the display lock, where
- *                          there is a widget tree and no message.
+ * Most types want no entry here:
  *
- * A type that only wants different words implements the first. A type that
- * wants to look different implements the second. A type that follows the
- * convention -- a readable line in searchable_content -- implements neither
- * and still gets a bubble, a conversation row and an unread count, which is
- * the case worth optimising for.
+ *   different WORDS   change the type's digest in custom_message_config.c.
+ *                     The conversation list and the bubble read the same one,
+ *                     so they stay in step for free.
+ *   a centred notice  register the type with .notification = true. The page
+ *                     draws it exactly like the built-in group notices.
+ *   nothing special   put a readable line in searchable_content and you get a
+ *                     bubble, a conversation row and an unread count.
+ *
+ * What is left for this file is types that have to LOOK different.
  */
 
-#include <stdio.h>
-#include <string.h>
+#include <stddef.h>
 
 #include "ui_page.h"
 
 #include "custom_message.h"
 
-/* -------------------------------------------------------------- the text */
-
-bool custom_message_text(const wfc_message_t *msg, char *buf, size_t buf_size)
-{
-    switch (msg->content.type) {
-    case MESSAGE_CONTENT_TYPE_CUSTOM_MESSAGE_TEST:
-        /* The bubble says more than the conversation row does: the row has
-         * one line for the whole conversation and shows the body alone, while
-         * here there is room to say what kind of message it is. Decoding a
-         * JSON payload -- the usual shape of a real custom message -- belongs
-         * exactly here, where content.data is still valid. */
-        snprintf(buf, buf_size, "%s", msg->content.searchable_content);
-        return true;
-
-    case MESSAGE_CONTENT_TYPE_CUSTOM_MESSAGE_TEST_NOTIFICATION:
-        /* Registered as a notification, so the page centres it; the text is
-         * the tip, which travels in MessageContent.content. */
-        snprintf(buf, buf_size, "%s", msg->content.content);
-        return true;
-
-    default:
-        return false;
-    }
-}
-
 /* -------------------------------------------------------------- the view */
 
 /* The test type's bubble: the ordinary one with a label over it, which is the
- * cheapest thing that is visibly not a text message. A real custom view --
- * a work order with a button, a reading with a gauge -- is built the same
- * way, from this parent and these colours. */
-static void draw_test(lv_obj_t *parent, const custom_message_row_t *row)
+ * cheapest thing that is visibly not a text message. A real custom view -- a
+ * work order with a button, a reading with a gauge -- is built the same way,
+ * from this container and these colours.
+ *
+ * Note what it does NOT do: go looking for its body. That arrived in
+ * searchable_content, so row->text already holds it by the time this runs --
+ * put the body where every WFC client looks for it and the only thing left to
+ * write is the appearance. A type whose body will not fit in a line of text
+ * reads it back out of the store from the chat page's prime(), keyed by
+ * row->message_uid; it does not get carried along in the row. */
+static void draw_test(lv_obj_t *parent, const ui_msg_row_t *row)
 {
-    lv_obj_t *line = lv_obj_create(parent);
-
-    ui_style_flat(line);
-    lv_obj_set_size(line, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_opa(line, LV_OPA_TRANSP, 0);
-    lv_obj_set_flex_flow(line, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(line, 1, 0);
-    lv_obj_set_flex_align(line, LV_FLEX_ALIGN_START,
-                          row->mine ? LV_FLEX_ALIGN_END : LV_FLEX_ALIGN_START,
-                          row->mine ? LV_FLEX_ALIGN_END : LV_FLEX_ALIGN_START);
+    lv_obj_t *line = ui_msg_line(parent, row);
 
     /* The tag stands in for what a real view puts here -- a title, an icon,
-     * the sender in a group (row->who). */
+     * the sender in a group (row->who, when row->group). */
     lv_obj_t *tag = lv_label_create(line);
 
     lv_obj_set_style_text_font(tag, UI_FONT_SMALL, 0);
@@ -94,18 +67,27 @@ static void draw_test(lv_obj_t *parent, const custom_message_row_t *row)
     lv_label_set_text(bubble, row->text);
 }
 
-bool custom_message_draw(lv_obj_t *parent, const custom_message_row_t *row)
-{
-    switch (row->type) {
-    case MESSAGE_CONTENT_TYPE_CUSTOM_MESSAGE_TEST:
-        draw_test(parent, row);
-        return true;
+/* ------------------------------------------------------------- the table */
 
-    default:
-        /* Including the notification: it is registered as one, so the page's
-         * own centred line already draws it -- the same way the built-in
-         * group notices are drawn, which is the point of registering it that
-         * way instead of drawing it here. */
-        return false;
+static const ui_msg_view_t CUSTOM_VIEWS[] = {
+    {
+        .type = MESSAGE_CONTENT_TYPE_CUSTOM_MESSAGE_TEST,
+        .draw = draw_test,
+    },
+    /* MESSAGE_CONTENT_TYPE_CUSTOM_MESSAGE_TEST_NOTIFICATION is deliberately
+     * absent. It is registered as a notification, so the page draws it as a
+     * centred line exactly like the built-in group notices, and its digest
+     * already reads the tip out of MessageContent.content. A type that wants
+     * to look like the rest of the client should say so in the type table
+     * rather than draw itself here. */
+};
+
+const ui_msg_view_t *custom_message_view(int32_t type)
+{
+    for (size_t i = 0; i < sizeof(CUSTOM_VIEWS) / sizeof(CUSTOM_VIEWS[0]); i++) {
+        if (CUSTOM_VIEWS[i].type == type) {
+            return &CUSTOM_VIEWS[i];
+        }
     }
+    return NULL;
 }

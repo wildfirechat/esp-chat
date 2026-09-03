@@ -268,6 +268,23 @@ esp_err_t wfc_send_conference_request(int64_t session_id, const char *room_id,
 esp_err_t wfc_get_messages(const wfc_conversation_t *conv, size_t limit,
                            wfc_store_message_cb_t cb, void *ud);
 
+/* One stored message, by the server UID a caller kept from a walk. False when
+ * nothing is held under it; `cb` runs at most once and its return value is
+ * ignored.
+ *
+ * What this is for: a screen keeps rows, not messages -- a message BORROWS
+ * (wfc_model.h) and cannot outlive the callback it arrived in, so a page that
+ * wants a field it did not copy has to ask again. Copying more of the message
+ * into the row instead is the trap this exists to avoid: a row is fixed size
+ * and rebuilt on every repaint, so a field long enough to matter (a media URL
+ * runs to CONFIG_WFC_STORE_MAX_TEXT) gets clipped there, silently.
+ *
+ * Cheap -- it is an index lookup on the same unique index the deduplicator
+ * uses -- but not free, and it takes the store's lock. Ask from somewhere
+ * that can afford it: once per thing that needs one, not once per row of a
+ * redraw. */
+bool wfc_get_message(int64_t message_uid, wfc_store_message_cb_t cb, void *ud);
+
 /* Where the catch-up has got to, and whether it is still running. */
 int64_t  wfc_message_head(void);
 bool     wfc_is_syncing(void);

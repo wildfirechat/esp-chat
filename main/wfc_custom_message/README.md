@@ -14,15 +14,21 @@
 | 2 | 实现消息 `testCustomMessageContent.js`（encode/decode/digest） | [custom_message_config.c](custom_message_config.c) 的发送函数 + digest 函数 |
 | 3 | 配置注册 `customMessageConfig.js` | [custom_message_config.c](custom_message_config.c) 的 `CUSTOM_MESSAGES[]` |
 | 4 | 实现 UI `TestCustomMessageContentView.vue` | [custom_message_view.c](custom_message_view.c) 的 `draw_test()` |
-| 5 | 配置消息与 UI 的对应 `MessageContentContainerView.vue` | [custom_message_view.c](custom_message_view.c) 的 `custom_message_draw()` |
+| 5 | 配置消息与 UI 的对应 `MessageContentContainerView.vue` | [custom_message_view.c](custom_message_view.c) 的 `CUSTOM_VIEWS[]` |
 
-C 这边没有类，所以 web 端 `MessageContent` 子类的三个方法散落成了三处，
-但都在这个目录里：
+C 这边没有类，所以 web 端 `MessageContent` 子类的方法散落成了两处：
 
 - `encode()` → `custom_message_send_*()`：决定正文写进哪个字段
-- `decode()` → `custom_message_text()`：把正文读回来（**在 store 回调里跑，
-  这是消息的 payload 还活着的唯一时刻**）
-- `digest()` → 表里的 `.digest` 函数：会话列表那一行
+- `digest()` → 表里的 `.digest` 函数：会话列表那一行，**也是气泡里那行字**
+
+`decode()` 没有对应物，这是有意的。聊天页给视图的 row **只有信封**
+（谁、什么时候、是不是自己发的、是不是群），加一行 digest。
+正文放不进那一行的类型——图片、工单——**在 `prime()` 里按 `message_uid`
+回头读 store**，而不是在收集消息的时候顺手抄一份进 row。
+
+为什么：抄进 row 的一定是定长字段，而 store 里的文本能有 512 字节，
+抄的时候会**静默截断**（图片的 URL 就踩过这个）；而且那份抄本每次重绘都要重建
+30 遍，只为其中一两条用得上。`prime()` 在锁外、可阻塞、有需要才走一次。
 
 ## 最小的自定义消息：一行代码都不用写
 
@@ -76,9 +82,14 @@ C 这边没有类，所以 web 端 `MessageContent` 子类的三个方法散落�
 - **注册要在 `wfc_client_connect()` 之前**。会话行的摘要是消息入库那一刻算好存下来的，
   后注册不会回头去修历史行。[app_main.c](../app_main.c) 里的调用点就在
   `wfc_client_init()` 后面。
-- **`custom_message_text()` 在 store 的查询回调里跑**，`msg` 出了这个回调就悬空。
-  要解 JSON 就在这儿解。它同时也拿着 store 的锁：别阻塞，别回头调 `wfc_client.h`。
-- **`custom_message_draw()` 在 UI 任务上、握着显示锁跑**：只能建控件，不能发请求。
+- **视图的 `draw()` 在 UI 任务上、握着显示锁跑**：只能建控件，不能发请求。
+  要下载、要解码的东西（图片就是）得走 `prime()`，缓存放在 row 外面按 uid 索引。
+- **要回头查 store 就在 `prime()` 里查**，用 `wfc_get_message(row->message_uid, ...)`。
+  不是因为 `draw()` 里查慢——是因为 `draw()` 不能阻塞，而查出来的东西要干的事
+  （下载、解码）全都阻塞，拿到了也用不上。
+- **消息在 store 里就已经是截断过的**：文本 `CONFIG_WFC_STORE_MAX_TEXT`（512）、
+  `content.data` `CONFIG_WFC_STORE_MAX_DATA`（1024）。**在线收到那一次是完整的，
+  重启后读回来是半截**——截断会打 WARN 并写明字段。别在这之上再叠一层自己的截断。
 - **二进制 payload 有上限**。`MessageContent.data` 存进本地库时按
   `CONFIG_WFC_STORE_MAX_DATA`（默认 1024 字节）截断，文本字段按
   `CONFIG_WFC_STORE_MAX_TEXT`（默认 512）。截断会打 WARN 日志并写明是哪个字段——

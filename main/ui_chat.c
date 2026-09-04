@@ -18,9 +18,20 @@
  * store, by message_uid, from prime().
  *
  * Opening the conversation marks it read, which is what every client does and
- * what makes the unread badge mean something. It is local only -- telling the
- * server is the read-receipt path, which needs the receipt feature bit and is
- * second phase.
+ * what makes the unread badge mean something. That now also tells the server
+ * -- wfc_clear_unread() reports it, so the phone stops badging the same
+ * conversation and the sender gets a read receipt -- but it is still one call
+ * and it still does not block, so nothing here changes.
+ *
+ * Coming back the other way: a message we sent carries how far the other side
+ * has got, read out of the store while the rows are built and drawn by
+ * ui_msg_receipt() at the end of every view.
+ *
+ * The buttons beside the input are a microphone (always), 对讲 (in a build
+ * with the PTT SDK, on both kinds of conversation) and then whichever of two
+ * this conversation has: a phone for a single chat, and 群 for a group -- the
+ * way to the roster and to the three things that change it. The last two
+ * never both apply.
  */
 
 #include <stdio.h>
@@ -30,6 +41,7 @@
 #include "ui_media.h"
 #include "ui_page.h"
 #include "ui_msg_view.h"
+#include "ui_voice.h"
 #include "wfc_mem.h"
 
 #include "custom_message.h"
@@ -51,10 +63,16 @@ static lv_obj_t          *s_input_label;
  * button that always declines is worse than no button. */
 static lv_obj_t          *s_call;
 static lv_obj_t          *s_call_label;
+/* On both kinds of conversation, and only in a build with the PTT SDK. */
+static lv_obj_t          *s_ptt;
+static lv_obj_t          *s_ptt_label;
 static ui_msg_row_t      *s_rows;      /* MSG_MAX of them, in PSRAM */
 static size_t             s_count;
 /* Written by the composer's callback, drained by prime(). */
 static char               s_pending[PENDING_MAX];
+/* Asked once per repaint rather than once per row: it reads a user setting
+ * out of the store, and the answer is the same for all thirty of them. */
+static bool               s_receipts;
 
 /* --------------------------------------------------------------- reading */
 
@@ -75,6 +93,16 @@ static bool collect(const wfc_message_t *msg, void *ud)
      * a custom type registered as a notification is centred like the built-in
      * ones, and this page does not have to learn about it. */
     row->notice      = wfc_content_is_notification(msg->content.type);
+    /* Receipts, for our own messages only. Two store lookups per row, and
+     * they are here rather than in draw() because this is the pass that is
+     * allowed to read the store deeply -- and because a row that already
+     * knows costs a view nothing. On a deployment without receipts they would
+     * each answer "nothing yet" anyway; s_receipts is what stops them being
+     * asked thirty times to be told so. */
+    if (row->mine && s_receipts) {
+        row->receipt = (int8_t)wfc_message_receipt(&s_conv, msg->timestamp);
+        row->read_by = (uint8_t)wfc_message_read_count(&s_conv, msg->timestamp);
+    }
 
     strlcpy(row->from, row->mine ? "" : msg->from, sizeof(row->from));
     wfc_get_display_name(row->mine ? wfc_client_user_id() : msg->from,
@@ -178,6 +206,8 @@ static void draw_bubble(const ui_msg_row_t *row, bool show_who)
     lv_obj_set_style_text_color(
         bubble, lv_color_hex(row->mine ? 0xFFFFFF : UI_C_TEXT), 0);
     lv_label_set_text(bubble, row->text);
+
+    ui_msg_receipt(line, row);
 }
 
 /* ---------------------------------------------------------------- input */
@@ -202,6 +232,40 @@ static void input_clicked(lv_event_t *e)
     ui_compose_open(title, send_text);
 }
 
+/* The recorder hands the audio back here. Unlike send_text() this does not
+ * park anything for prime(): a voice message is an upload, which is seconds,
+ * and prime() runs on the UI task. ui_voice_send() takes the buffer and
+ * returns, and the conversation goes with it -- so leaving this page while it
+ * is still going up is fine.
+ *
+ * The conversation is read here rather than inside ui_voice.c for the reason
+ * §8.13 wrote down about the composer: this runs while the RECORD page is
+ * current, so s_conv is still whatever this page was opened for. */
+static void send_voice(uint8_t *amr, size_t len, int seconds)
+{
+    ui_voice_send(&s_conv, amr, len, seconds);
+}
+
+static void mic_clicked(lv_event_t *e)
+{
+    (void)e;
+
+    char title[UI_TITLE_MAX];
+
+    wfc_get_conversation_title(&s_conv, title, sizeof(title));
+    ui_record_open(title, send_voice);
+}
+
+/* 对讲. Unlike the phone beside it this starts nothing -- the page is where
+ * the button that talks is -- so it is a plain navigation, and it is offered
+ * on a group as readily as on a single chat: a channel with three people on
+ * it is what push-to-talk is for. */
+static void ptt_clicked(lv_event_t *e)
+{
+    (void)e;
+    ui_ptt_open(&s_conv);
+}
+
 /* Placing a call, or getting back to one that is already up -- ui_call_dial()
  * is both, and it is a post either way, which it has to be: this runs on the
  * LVGL task with the display lock held, and starting a call sends an IM
@@ -210,6 +274,15 @@ static void call_clicked(lv_event_t *e)
 {
     (void)e;
     ui_call_dial(s_conv.target);
+}
+
+/* The same slot as the phone button, which a group never has: there is no
+ * group call in this build, and a group is the conversation with somewhere
+ * else to go -- the roster and the three things that change it (ui_group.c). */
+static void group_clicked(lv_event_t *e)
+{
+    (void)e;
+    ui_group_open(s_conv.target);
 }
 
 /* ------------------------------------------------------------ the page */
@@ -269,6 +342,42 @@ static void create(lv_obj_t *parent)
     lv_label_set_text(s_input_label, "输入消息…");
     lv_obj_align(s_input_label, LV_ALIGN_LEFT_MID, 4, 0);
 
+    /* Always there, on both kinds of conversation and in every build: a
+     * voice message needs the microphone but not the AV SDK, so unlike the
+     * phone beside it this button does not come and go. */
+    lv_obj_t *mic = lv_button_create(bar);
+
+    lv_obj_set_size(mic, 40, LV_PCT(100));
+    lv_obj_set_style_bg_color(mic, lv_color_hex(UI_C_RAISED), 0);
+    lv_obj_set_style_shadow_width(mic, 0, 0);
+    lv_obj_set_style_radius(mic, 6, 0);
+    lv_obj_add_event_cb(mic, mic_clicked, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *mic_label = lv_label_create(mic);
+
+    lv_obj_set_style_text_color(mic_label, lv_color_hex(UI_C_DIM), 0);
+    lv_label_set_text(mic_label, LV_SYMBOL_AUDIO);
+    lv_obj_center(mic_label);
+
+    /* Both kinds of conversation, and only in a build that has the PTT SDK:
+     * with CONFIG_APP_PTT=n there is nothing behind it, so there is no button
+     * (ui_page.h). It is a separate switch from the phone's -- a talk needs
+     * the microphone, not WebRTC. */
+    if (ui_ptt_available()) {
+        s_ptt = lv_button_create(bar);
+        lv_obj_set_size(s_ptt, 46, LV_PCT(100));
+        lv_obj_set_style_bg_color(s_ptt, lv_color_hex(UI_C_RAISED), 0);
+        lv_obj_set_style_shadow_width(s_ptt, 0, 0);
+        lv_obj_set_style_radius(s_ptt, 6, 0);
+        lv_obj_set_style_pad_hor(s_ptt, 2, 0);
+        lv_obj_add_event_cb(s_ptt, ptt_clicked, LV_EVENT_CLICKED, NULL);
+
+        s_ptt_label = lv_label_create(s_ptt);
+        lv_obj_set_style_text_color(s_ptt_label, lv_color_hex(UI_C_DIM), 0);
+        lv_label_set_text(s_ptt_label, "对讲");
+        lv_obj_center(s_ptt_label);
+    }
+
     /* One-to-one only, and only in a build that has the AV SDK: with
      * CONFIG_APP_CALL=n there is nothing behind the button, so there is no
      * button (ui_page.h). Everything below that touches it is already written
@@ -285,6 +394,19 @@ static void create(lv_obj_t *parent)
         lv_obj_set_style_text_color(s_call_label, lv_color_hex(UI_C_OK), 0);
         lv_label_set_text(s_call_label, LV_SYMBOL_CALL);
         lv_obj_center(s_call_label);
+    } else if (s_conv.type == WFC_CONV_GROUP) {
+        lv_obj_t *group = lv_button_create(bar);
+
+        lv_obj_set_size(group, 46, LV_PCT(100));
+        lv_obj_set_style_bg_color(group, lv_color_hex(UI_C_RAISED), 0);
+        lv_obj_set_style_shadow_width(group, 0, 0);
+        lv_obj_set_style_radius(group, 6, 0);
+        lv_obj_add_event_cb(group, group_clicked, LV_EVENT_CLICKED, NULL);
+
+        lv_obj_t *label = lv_label_create(group);
+        lv_obj_set_style_text_color(label, lv_color_hex(UI_C_DIM), 0);
+        lv_label_set_text(label, "群");
+        lv_obj_center(label);
     }
 
     /* Opening a conversation reads it. */
@@ -294,7 +416,7 @@ static void create(lv_obj_t *parent)
 static void refresh(uint32_t dirty)
 {
     if ((dirty & (UI_DIRTY_MESSAGES | UI_DIRTY_NAMES | UI_DIRTY_CONVS |
-                  UI_DIRTY_MEDIA)) == 0) {
+                  UI_DIRTY_MEDIA | UI_DIRTY_PTT)) == 0) {
         return;
     }
     if (s_rows == NULL) {
@@ -309,6 +431,22 @@ static void refresh(uint32_t dirty)
         lv_obj_remove_state(s_input, LV_STATE_DISABLED);
     } else {
         lv_obj_add_state(s_input, LV_STATE_DISABLED);
+    }
+
+    if (s_ptt != NULL) {
+        /* Lit while this board is talking or hearing somebody -- on any
+         * channel, since listening is global. It is the only thing on this
+         * page that says a talk is happening while the page itself is not
+         * the 对讲 one. */
+        bool busy = ui_ptt_busy();
+
+        lv_obj_set_style_text_color(
+            s_ptt_label, lv_color_hex(busy ? UI_C_IN : UI_C_DIM), 0);
+        if (connected) {
+            lv_obj_remove_state(s_ptt, LV_STATE_DISABLED);
+        } else {
+            lv_obj_add_state(s_ptt, LV_STATE_DISABLED);
+        }
     }
 
     if (s_call != NULL) {
@@ -326,7 +464,8 @@ static void refresh(uint32_t dirty)
         }
     }
 
-    s_count = 0;
+    s_count    = 0;
+    s_receipts = wfc_is_receipt_enabled();
     memset(s_rows, 0, MSG_MAX * sizeof(*s_rows));
     wfc_get_messages(&s_conv, MSG_MAX, collect, NULL);
 
@@ -393,6 +532,8 @@ static void destroy(void)
     s_input_label = NULL;
     s_call        = NULL;
     s_call_label  = NULL;
+    s_ptt         = NULL;
+    s_ptt_label   = NULL;
     s_count       = 0;
 }
 

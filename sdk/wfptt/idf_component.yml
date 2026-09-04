@@ -1,0 +1,12 @@
+dependencies:
+  idf: ">=5.3"
+
+# Nothing else. That is worth stating rather than leaving as an empty file:
+# this module has no managed dependencies at all, because the two things it
+# would otherwise need are already somewhere else. The audio comes from the
+# application (wfptt_audio.h), and the one JSON object on the wire -- {"p":0}
+# -- is written and read by hand rather than by pulling in cJSON for a single
+# integer, the same call wfc-esp makes about {"duration":N}.
+#
+# Which is what makes wfptt cheap to add to a build: no download, no codec, no
+# second copy of anything.

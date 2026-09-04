@@ -20,6 +20,30 @@ menu "Chat app"
             components, do not have ../wfav-esp checked out at all -- then this
             has to be n, and the build says so if it is not.
 
+    config APP_PTT
+        bool "Push-to-talk (对讲)"
+        default y
+        help
+            Whether this build can hold a button and be heard by everyone in a
+            conversation.
+
+            Push-to-talk is the SDK in ../wfptt-esp, which is a separate module
+            on purpose. Turning this off compiles main/ui_ptt_none.c instead of
+            main/ui_ptt.c and main/app_ptt.c, so nothing calls into wfptt and
+            the module is dropped at link time. The chat page then has no 对讲
+            button, and somebody talking reaches a board that is not listening
+            -- which to them looks exactly like a board that is switched off.
+
+            It is a SEPARATE switch from APP_CALL, and that is the point of
+            having two. A talk is a burst of ordinary IM messages carrying
+            AMR-NB, so it needs the microphone and the long link and nothing
+            else: no WebRTC, no Opus, no AEC. A CONFIG_APP_CALL=n build --
+            2.4 MB rather than 4.9 -- is still a walkie-talkie.
+
+            The SDK is still compiled in that case, just not linked. To leave
+            it out of the build entirely do not have ../wfptt-esp checked out
+            at all -- then this has to be n, and the build says so if it is not.
+
     config APP_TURN_URL
         string "TURN/STUN server, overriding the AV SDK's own"
         depends on APP_CALL
@@ -60,16 +84,40 @@ menu "Chat app"
             Only read when APP_TURN_URL is not empty. A credential: put it in
             sdkconfig.local, not here.
 
+    config APP_SERVER_URL
+        string "App server, for the QR login"
+        default "https://app.wildfirechat.net"
+        help
+            Where the QR login talks: POST /pc_session to mint a login
+            session, POST /session_login/<token> to wait for a phone to
+            confirm it (app_login.h). It is the deployment's *app* server --
+            the one the phone app calls AppService.APP_SERVER_ADDRESS -- and
+            not the IM server in WFC_HOST below; a deployment usually runs
+            both, on different ports.
+
+            https here means the clock has to be right before the first
+            request, which it is: the boot path syncs SNTP before it asks.
+
+            Only consulted by a board with no stored account. A board
+            configured through sdkconfig.local never calls it.
+
     config APP_WIFI_SSID
-        string "WiFi SSID"
+        string "WiFi SSID, for the first boot only"
         default ""
         help
-            Set this in sdkconfig.local, which is gitignored. Empty here on
-            purpose so a fresh checkout fails loudly instead of trying to
-            associate with someone else's network.
+            A seed for NVS, not the setting itself. The board stores the
+            network it is on (app_cfg.h), and this is what a blank store is
+            filled with on the first boot -- so a bench board with a
+            sdkconfig.local comes up on your desk's WiFi as it always did, and
+            a board without one shows a QR code and asks a phone instead
+            (app_net.h).
+
+            Which means changing this later does nothing: NVS already has a
+            value and it wins. The status page has a button that clears it
+            and restarts, which is how a board is moved to another network.
 
     config APP_WIFI_PASSWORD
-        string "WiFi password"
+        string "WiFi password, for the first boot only"
         default ""
 
     config APP_SNTP_SERVER
@@ -85,6 +133,16 @@ menu "Chat app"
         string "POSIX timezone"
         default "CST-8"
 
+    config APP_VOICE_VOLUME
+        int "Voice message playback volume (%)"
+        range 0 100
+        default 80
+        help
+            How loud a received voice message is played. Separate from a
+            call's volume: a call is held near the face and a voice message
+            is played across a desk, so the two want different numbers and
+            the AV SDK is not always compiled in to take one from.
+
     config WFC_HOST
         string "IM server host"
         default "wildfirechat.net"
@@ -99,10 +157,15 @@ menu "Chat app"
         range 1 65535
 
     config WFC_USER_ID
-        string "User ID"
+        string "User ID, for the first boot only"
         default ""
         help
             Set this in sdkconfig.local together with the client ID and token.
+
+            Like the WiFi above, this seeds NVS on a first boot and is ignored
+            afterwards. Leave it empty and the board asks a phone to scan a
+            login QR code instead (app_login.h), which is the path that does
+            not need a token minted by hand.
 
     config WFC_CLIENT_ID
         string "Client ID"
@@ -117,6 +180,11 @@ menu "Chat app"
             which is what a real deployment wants; but a MAC-derived ID will
             not work with a token minted for a different one.
 
+            Decided once, on the first boot, and stored from then on
+            (app_cfg.h): the QR login sends it when it creates the session, so
+            the token that comes back is minted for it, and a board that later
+            changed its mind would have thrown that account away.
+
     config WFC_TOKEN
         string "App-server token"
         default ""
@@ -124,6 +192,9 @@ menu "Chat app"
             The base64 blob the app server returns. It decrypts (root key) to
             userToken|privateSecret|dbSecret. Treat it as a credential: put it
             in sdkconfig.local, not here.
+
+            Seeds NVS on the first boot, like the user ID above, and is what
+            the QR login writes there when there is no seed to take.
 
             The token also carries a platform, and the server keeps it on the
             session. It has to match WFC_PLATFORM in wfc_platform.h, which is

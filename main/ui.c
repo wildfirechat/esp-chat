@@ -41,11 +41,13 @@
 #include "bsp/esp-box-3.h"
 #include "lvgl.h"
 
+#include "app_audio.h"
 #include "ui.h"
-#include "ui_page.h"
-#include "wfc_font.h"
-
 #include "ui_media.h"
+#include "ui_msg_view.h"
+#include "ui_page.h"
+#include "ui_voice.h"
+#include "wfc_font.h"
 
 static const char *TAG = "ui";
 
@@ -69,6 +71,7 @@ enum {
     EVT_GOTO,      /* slot = ui_page_id_t */
     EVT_BACK,
     EVT_CALL_ENDED, /* text = why, for the call page's title */
+    EVT_CONV_GONE,  /* a conversation was removed under whatever is showing */
 };
 
 typedef struct {
@@ -97,10 +100,10 @@ static lv_obj_t *s_nav_btn[NAV_COUNT];
 static const ui_page_def_t *s_def;
 static ui_page_id_t         s_page = UI_PAGE_CONVS;
 static ui_page_id_t         s_home = UI_PAGE_CONVS;
-/* Deep enough for the longest path the pages can build: 联系人 -> a contact
- * -> that contact's chat -> the composer, with a call able to arrive on top
- * of any of them. */
-static ui_page_id_t         s_stack[4];
+/* Deep enough for the longest path the pages can build: 会话 -> a group's
+ * chat -> 群 -> 选人, or 联系人 -> 新的好友 -> a contact -> that contact's
+ * chat -> the composer, with a call able to arrive on top of any of them. */
+static ui_page_id_t         s_stack[6];
 static int                  s_depth;
 
 static const ui_page_def_t *const PAGES[UI_PAGE_COUNT] = {
@@ -110,8 +113,15 @@ static const ui_page_def_t *const PAGES[UI_PAGE_COUNT] = {
     [UI_PAGE_LOG]      = &ui_page_log,
     [UI_PAGE_CHAT]     = &ui_page_chat,
     [UI_PAGE_CONTACT]  = &ui_page_contact,
+    [UI_PAGE_REQUESTS] = &ui_page_requests,
+    [UI_PAGE_GROUP]    = &ui_page_group,
+    [UI_PAGE_PICK]     = &ui_page_pick,
     [UI_PAGE_COMPOSE]  = &ui_page_compose,
+    [UI_PAGE_RECORD]   = &ui_page_record,
     [UI_PAGE_CALL]     = &ui_page_call,
+    [UI_PAGE_PTT]      = &ui_page_ptt,
+    [UI_PAGE_PROVISION] = &ui_page_provision,
+    [UI_PAGE_LOGIN]     = &ui_page_login,
 };
 
 static const char *const NAV_NAMES[NAV_COUNT] = { "会话", "联系人", "状态", "日志" };
@@ -296,7 +306,10 @@ static void apply_chrome(void)
 {
     apply_title();
 
-    if (s_def->home) {
+    if (s_def->setup) {
+        lv_obj_add_flag(s_header_back, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_navbar, LV_OBJ_FLAG_HIDDEN);
+    } else if (s_def->home) {
         lv_obj_add_flag(s_header_back, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(s_navbar, LV_OBJ_FLAG_HIDDEN);
     } else {
@@ -436,6 +449,18 @@ static void apply(const ui_evt_t *evt)
         break;
     case EVT_CALL_ENDED:
         ui_call_set_end_reason(evt->text);
+        break;
+    case EVT_CONV_GONE:
+        /* A page standing on a conversation that no longer exists has to
+         * leave: the chat page would draw an empty conversation nothing can
+         * be sent to, and 群 and 选人 are about a group this account is no
+         * longer in. Which page is showing is only knowable here, on the UI
+         * task -- which is why the event that caused this went through the
+         * queue rather than deciding on the wfc task. */
+        if (s_page == UI_PAGE_CHAT || s_page == UI_PAGE_GROUP ||
+            s_page == UI_PAGE_PICK) {
+            nav_back();
+        }
         break;
     default:
         break;
@@ -643,6 +668,36 @@ static void on_friends(size_t n, void *ud)
     ui_dirty(UI_DIRTY_FRIENDS | UI_DIRTY_NAMES);
 }
 
+/* A request arrived, or one this board answered was acknowledged. Both bits
+ * again, and for a reason worth naming: the requests page draws names, and
+ * 联系人 carries the badge that counts the ones still waiting. */
+static void on_friend_requests(size_t n, void *ud)
+{
+    (void)ud;
+    ui_logf(UI_LOG_NOTE, "好友请求更新 %u 条", (unsigned)n);
+    ui_dirty(UI_DIRTY_REQUESTS | UI_DIRTY_FRIENDS);
+}
+
+/* A conversation is gone -- this account left the group, or the server says
+ * the group no longer exists. The list has to lose the row, and the chat page
+ * that may be showing it has to stop: leaving that page open would draw an
+ * empty conversation nothing can be sent to.
+ *
+ * Going back is a queue post like every other navigation, so it is safe from
+ * here (this runs on the wfc_mqtt task) and lands on the UI task a tick later
+ * -- by which time the row is already out of the store. */
+static void on_conversation_removed(const wfc_conversation_t *conv, void *ud)
+{
+    (void)ud;
+
+    char title[UI_TITLE_MAX];
+
+    wfc_get_conversation_title(conv, title, sizeof(title));
+    ui_logf(UI_LOG_NOTE, "%s 已经不在了", title);
+    ui_dirty(UI_DIRTY_CONVS | UI_DIRTY_MESSAGES | UI_DIRTY_NAMES);
+    post(EVT_CONV_GONE, 0, false, 0, NULL);
+}
+
 /* The account's settings changed -- here or on the phone. Both conversation
  * scopes also raise a conversation-update, which is what actually redraws the
  * list; this is for the scopes nothing on this board draws, so that a setting
@@ -652,6 +707,30 @@ static void on_user_settings(size_t n, void *ud)
     (void)ud;
     ESP_LOGI(TAG, "user settings: %u entr%s", (unsigned)n, n == 1 ? "y" : "ies");
     ui_dirty(UI_DIRTY_CONVS);
+}
+
+/* A receipt landed: somebody got, or read, something this board sent. Only
+ * the chat page draws it, and it draws it as part of a message -- so this is
+ * the messages bit and not a conversation one. The row itself does not
+ * change, which is why nothing here says "conversation". */
+static void on_receipts(size_t n)
+{
+    (void)n;
+    ui_dirty(UI_DIRTY_MESSAGES);
+}
+
+static void on_delivery(const wfc_delivery_t *entries, size_t n, void *ud)
+{
+    (void)entries;
+    (void)ud;
+    on_receipts(n);
+}
+
+static void on_read(const wfc_read_entry_t *entries, size_t n, void *ud)
+{
+    (void)entries;
+    (void)ud;
+    on_receipts(n);
 }
 
 static void subscribe_all(void)
@@ -665,7 +744,11 @@ static void subscribe_all(void)
     wfc_on_group_infos_update(on_group_infos, NULL);
     wfc_on_group_members_update(on_group_members, NULL);
     wfc_on_friend_list_update(on_friends, NULL);
+    wfc_on_friend_request_update(on_friend_requests, NULL);
+    wfc_on_conversation_removed(on_conversation_removed, NULL);
     wfc_on_user_settings_update(on_user_settings, NULL);
+    wfc_on_delivery_update(on_delivery, NULL);
+    wfc_on_read_update(on_read, NULL);
 
     /* The call page subscribes itself, because its events are the only ones
      * whose types come from the AV SDK -- and the AV SDK is optional
@@ -692,6 +775,11 @@ void ui_init(void)
     /* Cheap: the fetcher task itself is not created until a picture is
      * actually looked at (ui_media.h). */
     ui_media_start();
+
+    /* The audio path's one-at-a-time latch, and the task a tapped voice
+     * message hands its work to. */
+    app_audio_init();
+    ui_voice_start();
 
     lv_theme_t *theme = lv_theme_default_init(
         disp, lv_color_hex(UI_C_ACCENT), lv_color_hex(UI_C_DIM), true, &wfc_font_16);

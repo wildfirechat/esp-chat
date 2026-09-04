@@ -20,9 +20,10 @@ CONFIG_FREERTOS_HZ=1000
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 
 # --- app settings (see main/Kconfig.projbuild) ---
-# WiFi credentials and the WFC account live in sdkconfig.local (gitignored).
-# Without that file the build still compiles but stops at startup with a
-# "not configured" message.
+# WiFi credentials and the WFC account live in sdkconfig.local (gitignored),
+# and are a seed for NVS rather than the setting itself (main/app_cfg.h).
+# Without that file the board comes up asking a phone instead: a QR code for
+# the network, then a QR code for the account.
 CONFIG_APP_SNTP_SERVER="ntp.aliyun.com"
 CONFIG_APP_TIMEZONE="CST-8"
 CONFIG_WFC_HOST="wildfirechat.net"
@@ -60,6 +61,11 @@ CONFIG_LV_USE_CUSTOM_MALLOC=y
 CONFIG_LV_FONT_MONTSERRAT_12=y
 CONFIG_LV_FONT_MONTSERRAT_14=y
 CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=y
+
+# The QR codes on the 配网 and 扫码登录 pages. LVGL's own widget, which is a
+# canvas plus qrcodegen and about 10 KB of flash; nothing else on this board
+# draws one, and a board that has been configured once never shows one again.
+CONFIG_LV_USE_QRCODE=y
 
 # Chinese input. LVGL's pinyin IME with our own dictionary: the built-in one is
 # 321 syllables of traditional Chinese ("xie" offers 謝), so it is switched off

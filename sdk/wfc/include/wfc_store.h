@@ -95,17 +95,20 @@ esp_err_t wfc_store_clear(void);
  * of a re-download -- the whole point of P3.
  *
  * P3 wrote only WFC_KEY_MSG_HEAD; P4 added WFC_KEY_FRIEND_HEAD,
- * WFC_KEY_FRIEND_RQ_HEAD came with FRP and WFC_KEY_SETTING_HEAD with UG.
- * Those three are one mechanism written once -- see the sync table in
- * wfc_impl.c -- and the version each asks from is THIS key and nothing else.
- * It is not recomputed from the rows: user settings are a list this client
- * also writes to, so the newest update_dt in the table can be a stamp we put
- * there ourselves, which would run the head past the server's and skip
- * whatever another device changed in between.
+ * WFC_KEY_FRIEND_RQ_HEAD came with FRP, WFC_KEY_SETTING_HEAD with UG, and
+ * WFC_KEY_RECV_HEAD / WFC_KEY_READ_HEAD with the two receipt lists. Those
+ * five are one mechanism written once -- see the sync table in wfc_impl.c --
+ * and the version each asks from is THIS key and nothing else. It is not
+ * recomputed from the rows: user settings are a list this client also writes
+ * to, so the newest update_dt in the table can be a stamp we put there
+ * ourselves, which would run the head past the server's and skip whatever
+ * another device changed in between. The two receipt lists make the same
+ * point from the other side -- their answers carry their own `current`, so
+ * there is nothing in the rows to derive a version from at all.
  *
- * The last two are named here because they arrive in the same CONNACK
- * (wfc_mqtt.h) and belong to lists this client does not sync yet -- the two
- * receipt lists (ASSESSMENT.md section 7). */
+ * WFC_KEY_GROUP_CONV_HEAD is named here because it arrives in the same
+ * CONNACK (wfc_mqtt.h) and belongs to a list this client does not sync yet --
+ * the super-group per-conversation sync (ASSESSMENT.md section 7). */
 #define WFC_KEY_MSG_HEAD        "msg_head"
 #define WFC_KEY_FRIEND_HEAD     "friend_head"
 #define WFC_KEY_FRIEND_RQ_HEAD  "friend_rq_head"
@@ -213,9 +216,9 @@ uint32_t wfc_store_conversation_count(void);
 /* Sum of every conversation's unread and mention counts -- the badge. */
 uint32_t wfc_store_total_unread(void);
 
-/* Marks a conversation read: both counters to zero. Purely local. Telling the
- * server (so other clients agree) is the RDP/read-receipt path, which needs
- * the receipt feature bit and is not this milestone. */
+/* Marks a conversation read: both counters to zero. Purely local -- telling
+ * the server, so the other end and this account's other devices agree, is
+ * wfc_clear_unread() in wfc_client.h, which calls this and then reports. */
 esp_err_t wfc_store_clear_unread(const wfc_conversation_t *conv);
 
 /* Forgets a conversation and the messages in it. Used when the server says a
@@ -292,6 +295,17 @@ esp_err_t wfc_store_query_friends(size_t limit, wfc_store_friend_cb_t cb, void *
  * direction. */
 esp_err_t wfc_store_put_friend_requests(const wfc_friend_request_t *requests, size_t n);
 
+/* One request by the pair it belongs to. False when there is none, leaving
+ * `out` untouched.
+ *
+ * The lookup exists for the write path rather than for drawing: answering a
+ * request (FHR) files the new status locally on the acknowledgement, and the
+ * row has to be read before it is written back or the reason the sender typed
+ * -- which is the only part of it a person reads -- would be replaced by an
+ * empty string until the next FRP. */
+bool wfc_store_get_friend_request(const char *from_uid, const char *to_uid,
+                                  wfc_friend_request_t *out);
+
 typedef bool (*wfc_store_friend_request_cb_t)(const wfc_friend_request_t *entry,
                                               void *ud);
 
@@ -329,6 +343,40 @@ typedef bool (*wfc_store_user_setting_cb_t)(const wfc_user_setting_t *entry, voi
  * WFC_SETTING_SCOPE_ANY. In cache order, like the friends query. */
 esp_err_t wfc_store_query_user_settings(int32_t scope, size_t limit,
                                         wfc_store_user_setting_cb_t cb, void *ud);
+
+/* --------------------------------------------------------------- receipts */
+
+/* The fourth and fifth head-driven lists: RCP's deliveries and RDP's reads
+ * (wfc_model.h says what each one means and why they are shaped differently).
+ *
+ * Both puts take the LATER of the stored value and the new one rather than
+ * overwriting. The server's clocks only go forward, but a delta that arrives
+ * out of order -- a reconnect racing a push -- would otherwise walk a receipt
+ * backwards and un-tick a message that was already read.
+ *
+ * Neither table is a projection onto anything: a receipt is read where it is
+ * drawn, by comparing it against a message's timestamp, so unlike the pinned
+ * and muted settings there is no conversation row to keep in step. Both are
+ * bounded by CONFIG_WFC_STORE_MAX_PROFILES, which is the same scale -- a row
+ * per person talked to, and per conversation for reads. */
+
+esp_err_t wfc_store_put_deliveries(const wfc_delivery_t *entries, size_t n);
+
+/* 0 when nothing is held for this user, which reads the same as "nothing of
+ * ours has reached them yet" and is what the caller wants either way. */
+int64_t wfc_store_delivery_dt(const char *user_id);
+
+esp_err_t wfc_store_put_reads(const wfc_read_entry_t *entries, size_t n);
+
+int64_t wfc_store_read_dt(const wfc_conversation_t *conv, const char *user_id);
+
+typedef bool (*wfc_store_read_cb_t)(const wfc_read_entry_t *entry, void *ud);
+
+/* Everyone whose read mark this store holds for `conv`. A single chat has at
+ * most one; a group has one per member who has read anything, which is what
+ * "read by 3" counts. In cache order, like the friends query. */
+esp_err_t wfc_store_query_reads(const wfc_conversation_t *conv, size_t limit,
+                                wfc_store_read_cb_t cb, void *ud);
 
 #ifdef __cplusplus
 }

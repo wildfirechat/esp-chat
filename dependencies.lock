@@ -690,6 +690,6 @@ direct_dependencies:
 - espressif/esp_peer
 - espressif/zlib
 - idf
-manifest_hash: fadfde28858575a96774e670a87af7bd851c21e4a6ca6ba6d0dd58fcba57089c
+manifest_hash: 1c5e29c3151ac7feffaec579ad2d8449f2ad0ea6042502809aaffa06b6ae3c12
 target: esp32s3
 version: 3.0.0

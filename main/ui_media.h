@@ -85,4 +85,23 @@ const lv_image_dsc_t *ui_media_get(int64_t message_uid);
  * moment. Leaving a conversation calls it with n = 0. */
 void ui_media_keep_only(const int64_t *uids, size_t n);
 
+/* ------------------------------------------------- the two shared halves
+ *
+ * Pictures are the first thing that needed bytes from a URL, not the only
+ * one: a voice message needs the same two steps -- find the URL a message
+ * points at, then get what is behind it -- and differs only in what it does
+ * with the result. Both live here because this file is the media layer, and
+ * because the download in particular is not the ten lines it looks like: it
+ * follows redirects by hand (esp_http_client will not, in the mode that lets
+ * the body go straight into one PSRAM buffer) and refuses a response with no
+ * Content-Length.
+ *
+ * Both block, and neither may be called from the UI task. */
+
+/* The remote URL a message points at, wfc_strdup'd, or NULL. */
+char *ui_media_url(int64_t message_uid);
+
+/* The whole body, in PSRAM, or NULL. Caller frees with wfc_free(). */
+uint8_t *ui_media_download(const char *url, size_t *out_len);
+
 #endif /* UI_MEDIA_H */

@@ -65,6 +65,11 @@ static void draw_test(lv_obj_t *parent, const ui_msg_row_t *row)
     lv_obj_set_style_border_width(bubble, 3, 0);
     lv_obj_set_style_text_color(bubble, lv_color_hex(UI_C_TEXT), 0);
     lv_label_set_text(bubble, row->text);
+
+    /* Every view ends with this, and a deployment's own is no exception: it
+     * draws nothing unless the message is ours and somebody has got it
+     * (ui_msg_view.h). */
+    ui_msg_receipt(line, row);
 }
 
 /* ------------------------------------------------------------- the table */

@@ -7,8 +7,8 @@
  * board is on a desk somewhere reading a struct that is no longer there.
  *
  * So: one named callback typedef and one named subscribe function per event.
- * Underneath, wfc_event.c holds the callback in a union of those twelve types
- * rather than casting a generic pointer, so there is no unchecked step at
+ * Underneath, wfc_event.c holds the callback in a union of those fifteen
+ * types rather than casting a generic pointer, so there is no unchecked step at
  * all. Changing what an event carries produces a list of the callers that
  * have to change with it, which is the entire point.
  *
@@ -81,6 +81,17 @@ typedef void (*wfc_on_recall_message_t)(const char *operator_uid,
 typedef void (*wfc_on_conversation_update_t)(const wfc_conversation_info_t *info,
                                              void *ud);
 
+/* A conversation's row is gone, along with the messages that were in it. Only
+ * groups reach this, and only two things cause it: quitting one, and a GPGM
+ * answering 253 for a group the server no longer has.
+ *
+ * Separate from the update above rather than folded into it as "an update to
+ * nothing", because there is nothing to hand over -- a wfc_conversation_info_t
+ * full of zeroes would be a row, and the point is that there is no longer a
+ * row. What the subscriber gets is the conversation that used to be there. */
+typedef void (*wfc_on_conversation_removed_t)(const wfc_conversation_t *conv,
+                                              void *ud);
+
 /* Profiles that just arrived from the server and are now in the store. The
  * arrays are the caller's scratch and die with the call; the store has them
  * if you want them later. */
@@ -112,6 +123,23 @@ typedef void (*wfc_on_friend_request_update_t)(size_t n, void *ud);
  * on that event needs nothing from this one. */
 typedef void (*wfc_on_user_settings_update_t)(size_t n, void *ud);
 
+/* Receipts that just landed and are now in the store: how far the people we
+ * talk to have got. The arrays are the caller's scratch and die with the
+ * call, like the profile events; the store has them if you want them later,
+ * and wfc_client.h's wfc_message_receipt() is the usual way to ask.
+ *
+ * Two events rather than one because the two lists are shaped differently
+ * (wfc_model.h): a delivery is about a person, a read is about a person in a
+ * conversation. A screen showing one chat wants the second and can usually
+ * ignore the first.
+ *
+ * Neither raises a conversation-update: a receipt changes what a message
+ * looks like, not what the conversation row says. */
+typedef void (*wfc_on_delivery_update_t)(const wfc_delivery_t *entries, size_t n,
+                                         void *ud);
+typedef void (*wfc_on_read_update_t)(const wfc_read_entry_t *entries, size_t n,
+                                     void *ud);
+
 /* A conference event the server pushed on CONFN: a participant published or
  * unpublished, someone joined or left, the room was destroyed.
  *
@@ -137,6 +165,8 @@ wfc_subscription_t *wfc_on_send_result(wfc_on_send_result_t cb, void *ud);
 wfc_subscription_t *wfc_on_recall_message(wfc_on_recall_message_t cb, void *ud);
 wfc_subscription_t *wfc_on_conversation_update(wfc_on_conversation_update_t cb,
                                                void *ud);
+wfc_subscription_t *wfc_on_conversation_removed(wfc_on_conversation_removed_t cb,
+                                                void *ud);
 wfc_subscription_t *wfc_on_user_infos_update(wfc_on_user_infos_update_t cb, void *ud);
 wfc_subscription_t *wfc_on_group_infos_update(wfc_on_group_infos_update_t cb, void *ud);
 wfc_subscription_t *wfc_on_group_members_update(wfc_on_group_members_update_t cb,
@@ -146,6 +176,8 @@ wfc_subscription_t *wfc_on_friend_request_update(wfc_on_friend_request_update_t 
                                                  void *ud);
 wfc_subscription_t *wfc_on_user_settings_update(wfc_on_user_settings_update_t cb,
                                                 void *ud);
+wfc_subscription_t *wfc_on_delivery_update(wfc_on_delivery_update_t cb, void *ud);
+wfc_subscription_t *wfc_on_read_update(wfc_on_read_update_t cb, void *ud);
 wfc_subscription_t *wfc_on_conference_event(wfc_on_conference_event_t cb, void *ud);
 
 /* Safe on NULL, safe from inside the callback being cancelled, and safe to

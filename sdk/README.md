@@ -1,7 +1,7 @@
-# sdk/ —— 二进制形式的 wfc / wfav
+# sdk/ —— 二进制形式的 wfc / wfav / wfptt
 
 这个目录是**生成物**，由内部工作区的 `tools/pack_sdk.py` 从
-`wfc-esp` 和 `wfav-esp` 的源码编译打包而来：每个模块一个 `.a` 加一份公开头文件，
+`wfc-esp`、`wfav-esp`、`wfptt-esp` 的源码编译打包而来：每个模块一个 `.a` 加一份公开头文件，
 是可以直接被 IDF 认出来的组件。工程根目录的 `CMakeLists.txt` **只要看见这个目录
 就挂这里**（看不见才去找同级的 `../wfc-esp` 源码），所以内部开发树和这里用的是
 同一份 `CMakeLists.txt`——`idf.py build` 开头那行 `wfc: sdk/wfc (packaged .a ...)`
@@ -9,22 +9,25 @@
 
 | 模块 | 内容 | 归档 | 源码版本 |
 |---|---|---|---|
-| [wfc/](./wfc/) | IM 客户端：协议、存储、模型、事件 | `lib/libwfc.a` 2786 KB | cc5d0c8 2026-09-03 |
+| [wfc/](./wfc/) | IM 客户端：协议、存储、模型、事件 | `lib/libwfc.a` 2884 KB | 0df238a 2026-09-04 |
 | [wfav/](./wfav/) | 音视频 SDK：通话信令、WebRTC、Opus | `lib/libwfav.a` 214 KB | 85b27ce 2026-09-02 |
+| [wfptt/](./wfptt/) | 对讲 SDK：频道、抢麦、AMR-NB 分片 | `lib/libwfptt.a` 67 KB | 0df238a 2026-09-04 |
 
 ```
 target      esp32s3
 IDF         v6.1.0
-打包日期     2026-09-03
+打包日期     2026-09-04
 sha256
-    wfc   c180e83592045ab943d8bf34d9955b10c73f2e6d44f9d6064c34c9f933b6dc71
+    wfc   70d8abc521c989bad609dea03844ae09cf102094b865c3241160f9f9f9c547d4
     wfav  1fdd6363cdeb7e4001872343f6115a231e389fd00c0803395f29b3712facfae9
+    wfptt 1a063cfaf50bae9ca2cb8b020352deb92325492ec704e653d4b0503841b0c837
 ```
 
 ## 公开头文件
 
-- **wfc**：`wfc_client.h`、`wfc_content.h`、`wfc_crypto.h`、`wfc_event.h`、`wfc_mem.h`、`wfc_model.h`、`wfc_mqtt.h`、`wfc_pb.h`、`wfc_platform.h`、`wfc_route.h`、`wfc_store.h`、`wfc_token.h`
+- **wfc**：`wfc_client.h`、`wfc_content.h`、`wfc_crypto.h`、`wfc_event.h`、`wfc_media.h`、`wfc_mem.h`、`wfc_model.h`、`wfc_mqtt.h`、`wfc_pb.h`、`wfc_platform.h`、`wfc_route.h`、`wfc_store.h`、`wfc_token.h`
 - **wfav**：`wfav.h`、`wfav_engine.h`、`wfav_event.h`、`wfav_session.h`、`wfav_types.h`
+- **wfptt**：`wfptt.h`、`wfptt_audio.h`、`wfptt_client.h`、`wfptt_event.h`、`wfptt_types.h`
 
 `pbc`（protobuf 运行时）和 `sqlite3` 的头文件不在这里：它们是 `libwfc.a` 的内部
 依赖，已经合进同一个归档，没有任何一个公开头文件 include 它们。
@@ -57,6 +60,16 @@ sha256
 | `CONFIG_WFC_STORE_PARTITION` | `storage` |
 | `CONFIG_WFC_STORE_RAM` | `false` |
 | `CONFIG_WFC_STORE_SQLITE` | `true` |
+| `CONFIG_WFPTT_CHUNK_MS` | `400` |
+| `CONFIG_WFPTT_GROUP_MAX_SPEAKERS` | `3` |
+| `CONFIG_WFPTT_LOCK_SECONDS` | `5` |
+| `CONFIG_WFPTT_MAX_TALKERS` | `8` |
+| `CONFIG_WFPTT_MAX_TALK_SECONDS` | `60` |
+| `CONFIG_WFPTT_PLAY_QUEUE` | `8` |
+| `CONFIG_WFPTT_SAVE_VOICE_MESSAGE` | `true` |
+| `CONFIG_WFPTT_SINGLE_MAX_SPEAKERS` | `1` |
+| `CONFIG_WFPTT_STALE_MS` | `60000` |
+| `CONFIG_WFPTT_TALKER_TIMEOUT_MS` | `2000` |
 
 要改这些，得有源码：换成 `../wfc-esp` / `../wfav-esp` 的源码树重新编，
 或者让维护者重新打一份包。

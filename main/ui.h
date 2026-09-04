@@ -64,6 +64,18 @@ void ui_client_ready(void);
  */
 void ui_call_start(void);
 
+/* Bring push-to-talk up: register its content types and start listening.
+ * Call once, after wfc_client_init() and before wfc_client_connect(), for
+ * both of the reasons ui_call_start() gives -- a content type registered
+ * after its messages have been filed does not fix the rows that were filed
+ * without it, and the first thing a board that was just switched on is likely
+ * to get is somebody already talking.
+ *
+ * Never fatal and never blocking on hardware: no codec is touched until there
+ * is audio. In a build with CONFIG_APP_PTT=n this is an empty function and the
+ * PTT SDK is not linked at all (ui_page.h). */
+void ui_ptt_start(void);
+
 /* The line in the header, for the stages that happen before the client exists
  * -- WiFi, SNTP, /route. Once the long link is up the UI takes this over from
  * the connection-status event and the application stops calling it. */

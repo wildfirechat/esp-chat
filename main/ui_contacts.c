@@ -19,6 +19,11 @@
  * arriving or a name landing redraws the list, and that is exactly when
  * asking again is worth it.
  *
+ * Two rows above the people are not people: 新的好友 leads to the requests
+ * page with a badge for the ones still waiting, and 发起群聊 opens the picker
+ * and makes a group out of what comes back. Both live here because this is
+ * where the address book is, and neither knows anything about the other.
+ *
  * The order is this page's own. Neither store backend sorts, and the order FP
  * happened to deliver in is not one anybody can find a name in, so the rows
  * are sorted after the walk -- by UTF-8 bytes, which is codepoint order: A to
@@ -35,6 +40,7 @@
 
 #include "ui_page.h"
 #include "wfc_mem.h"
+#include "wfc_store.h"
 
 static const char *TAG = "ui_contacts";
 
@@ -54,6 +60,21 @@ static size_t    s_count;
 /* Set by refresh() when it drew a row that is still an ID, drained by
  * prime(). */
 static bool      s_ask_names;
+
+/* How many requests are waiting for an answer, for the badge on the 新的好友
+ * row. Counted during the same repaint that reads the friends, because both
+ * are store walks and the row has to say something. */
+static size_t    s_waiting;
+
+/* A group the user asked for, parked by the picker's callback and drained by
+ * prime() -- the same arrangement the chat page has with the composer, and
+ * for the same reason: the callback runs on the LVGL task with the display
+ * lock held. */
+static struct {
+    char   members[UI_PICK_MAX][WFC_TARGET_MAX];
+    char   name[WFC_NAME_MAX];
+    size_t n;
+} s_new_group;
 
 /* --------------------------------------------------------------- reading */
 
@@ -106,9 +127,89 @@ static void sort_rows(void)
     }
 }
 
+/* Made when a group is created and nobody typed a name, which on this panel
+ * is always: WFC has no server-side default, so every client composes one out
+ * of who is in it, and this is that -- the first few display names, joined.
+ *
+ * It goes out as the group's real name, which is what makes it worth doing
+ * properly: cut on a character boundary like every other stored string, and
+ * with the count when there are more people than fit. */
+static void compose_group_name(char *buf, size_t buf_size, const char *const *uids,
+                               size_t n)
+{
+    char   part[WFC_NAME_MAX];
+    size_t used = 0;
+
+    buf[0] = '\0';
+    for (size_t i = 0; i < n && i < 3; i++) {
+        wfc_get_display_name(uids[i], NULL, part, sizeof(part));
+        used += (size_t)snprintf(buf + used, buf_size - used, "%s%s",
+                                 used > 0 ? "、" : "", part);
+        if (used >= buf_size) {
+            break;
+        }
+    }
+    if (n > 3 && used + 8 < buf_size) {
+        snprintf(buf + used, buf_size - used, " 等 %u 人", (unsigned)(n + 1));
+    }
+    /* Every name could have been an unresolved ID, or the buffer could have
+     * filled on the first one. Either way something has to go on the wire. */
+    if (buf[0] == '\0') {
+        strlcpy(buf, "群聊", buf_size);
+    }
+}
+
+static void picked_for_group(const char *const *uids, size_t n)
+{
+    s_new_group.n = n < UI_PICK_MAX ? n : UI_PICK_MAX;
+    for (size_t i = 0; i < s_new_group.n; i++) {
+        strlcpy(s_new_group.members[i], uids[i], WFC_TARGET_MAX);
+    }
+    compose_group_name(s_new_group.name, sizeof(s_new_group.name), uids,
+                       s_new_group.n);
+}
+
+/* Made by the client when the server answers, on the wfc_mqtt task -- so this
+ * only opens the conversation, which is a queue post like every other
+ * navigation. The group is already in the store by the time this runs
+ * (wfc_client.h), so the chat page comes up with its name on it. */
+static void group_created(int error_code, const char *group_id, void *ud)
+{
+    (void)ud;
+
+    /* The ID is the test rather than the code: 222 says some of the people
+     * asked for did not get in, and a group that exists with fewer people in
+     * it than were picked is still a group to open. */
+    if (group_id == NULL || group_id[0] == '\0') {
+        ui_logf(UI_LOG_ERROR, "建群失败（%d）", error_code);
+        return;
+    }
+
+    wfc_conversation_t conv = { .type = WFC_CONV_GROUP, .line = 0 };
+
+    strlcpy(conv.target, group_id, sizeof(conv.target));
+    ui_chat_open(&conv);
+}
+
 /* The page's prime(): no store lock, no display lock, so this may block. */
 static void prime(void)
 {
+    if (s_new_group.n > 0) {
+        const char *ids[UI_PICK_MAX];
+
+        for (size_t i = 0; i < s_new_group.n; i++) {
+            ids[i] = s_new_group.members[i];
+        }
+
+        esp_err_t err = wfc_create_group(s_new_group.name, ids, s_new_group.n,
+                                         group_created, NULL);
+
+        s_new_group.n = 0;
+        if (err != ESP_OK) {
+            ui_logf(UI_LOG_ERROR, "建群未能提交: %s", esp_err_to_name(err));
+        }
+    }
+
     if (s_rows == NULL || !s_ask_names) {
         return;
     }
@@ -132,6 +233,63 @@ static void row_clicked(lv_event_t *e)
     if (index < s_count) {
         ui_contact_open(s_rows[index].uid);
     }
+}
+
+/* The two rows above the people, which are not people. Both lead somewhere
+ * rather than saying anything, so they are drawn like a contact row with the
+ * same arrow -- what differs is that one carries a badge. */
+static void requests_clicked(lv_event_t *e)
+{
+    (void)e;
+    ui_goto(UI_PAGE_REQUESTS);
+}
+
+static void new_group_clicked(lv_event_t *e)
+{
+    (void)e;
+    ui_pick_open("发起群聊", UI_PICK_FRIENDS, NULL, picked_for_group);
+}
+
+static void draw_entry(const char *text, size_t badge, lv_event_cb_t on_click)
+{
+    lv_obj_t *row = lv_obj_create(s_list);
+
+    ui_style_flat(row);
+    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_color(row, lv_color_hex(UI_C_PANEL), 0);
+    lv_obj_set_style_radius(row, 6, 0);
+    lv_obj_set_style_pad_all(row, 8, 0);
+    lv_obj_set_style_pad_column(row, 6, 0);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(row, lv_color_hex(UI_C_RAISED), LV_STATE_PRESSED);
+    lv_obj_add_event_cb(row, on_click, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *label = lv_label_create(row);
+    lv_obj_set_flex_grow(label, 1);
+    lv_label_set_text(label, text);
+    lv_obj_set_style_text_color(label, lv_color_hex(UI_C_TEXT), 0);
+
+    if (badge > 0) {
+        lv_obj_t *count = lv_label_create(row);
+        char      text_buf[12];
+
+        snprintf(text_buf, sizeof(text_buf), "%u", (unsigned)badge);
+        lv_label_set_text(count, text_buf);
+        lv_obj_set_style_text_font(count, UI_FONT_SMALL, 0);
+        lv_obj_set_style_text_color(count, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_bg_color(count, lv_color_hex(UI_C_BAD), 0);
+        lv_obj_set_style_bg_opa(count, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(count, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_pad_hor(count, 5, 0);
+        lv_obj_set_style_pad_ver(count, 1, 0);
+    }
+
+    lv_obj_t *arrow = lv_label_create(row);
+    lv_label_set_text(arrow, LV_SYMBOL_RIGHT);
+    lv_obj_set_style_text_color(arrow, lv_color_hex(UI_C_DIM), 0);
 }
 
 static void draw_row(size_t index)
@@ -183,9 +341,23 @@ static void create(lv_obj_t *parent)
     lv_obj_set_scroll_dir(s_list, LV_DIR_VER);
 }
 
+/* Runs under the store's lock like collect(), and only counts: which side of
+ * a request this board is on is from_uid against our own ID, and the wire
+ * carries nothing else to tell them apart (wfc_model.h). */
+static bool count_waiting(const wfc_friend_request_t *entry, void *ud)
+{
+    (void)ud;
+
+    if (entry->status == WFC_FRIEND_RQ_PENDING &&
+        strcmp(entry->from_uid, wfc_client_user_id()) != 0) {
+        s_waiting++;
+    }
+    return true;
+}
+
 static void refresh(uint32_t dirty)
 {
-    if ((dirty & (UI_DIRTY_FRIENDS | UI_DIRTY_NAMES)) == 0) {
+    if ((dirty & (UI_DIRTY_FRIENDS | UI_DIRTY_NAMES | UI_DIRTY_REQUESTS)) == 0) {
         return;
     }
     if (s_rows == NULL) {
@@ -196,11 +368,19 @@ static void refresh(uint32_t dirty)
     wfc_get_friends(CONTACTS_MAX, collect, NULL);
     sort_rows();
 
+    s_waiting = 0;
+    wfc_get_friend_requests(CONTACTS_MAX, count_waiting, NULL);
+
     lv_obj_clean(s_list);
+
+    draw_entry("新的好友", s_waiting, requests_clicked);
+    draw_entry("发起群聊", 0, new_group_clicked);
+
     if (s_count == 0) {
-        /* The friend list is synced, not built here: this client reads FP and
-         * FRP and cannot answer a request (wfc_client.h), so the way to get a
-         * row on this screen is to add someone from a phone. */
+        /* Adding people is possible from here now (新的好友 answers requests,
+         * a contact page sends one), but a board with an empty address book
+         * still has nothing to search: there is no directory page, so the
+         * first friend comes from somewhere with a keyboard. */
         lv_obj_t *empty = ui_label(s_list, "还没有好友，先在手机上加一个", UI_C_DIM);
 
         lv_obj_set_style_pad_all(empty, 12, 0);

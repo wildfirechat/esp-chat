@@ -210,8 +210,12 @@ typedef struct {
 
 /* Friend.state: 0 is a friend, anything else is a relationship that ended.
  * The server sends the ended ones too -- that is how a delete propagates --
- * so the state has to be read, not assumed. */
-#define WFC_FRIEND_STATE_FRIEND 0
+ * so the state has to be read, not assumed. 1 is the value it writes when
+ * either side deletes the other (MemoryMessagesStore.java:4379), and it is
+ * named here because FDL writes the same row locally on the acknowledgement
+ * rather than waiting for the FN push to bring it back. */
+#define WFC_FRIEND_STATE_FRIEND  0
+#define WFC_FRIEND_STATE_DELETED 1
 
 typedef struct {
     char    uid[WFC_TARGET_MAX];
@@ -265,6 +269,16 @@ typedef struct {
 #define WFC_SETTING_CONVERSATION_SILENT 1
 #define WFC_SETTING_GLOBAL_SILENT       2
 #define WFC_SETTING_CONVERSATION_TOP    3
+/* How far this account has read a conversation, and the one scope no screen
+ * ever sets directly: writing it is how a client says "I have read up to
+ * here", which is both the account's own multi-device state and -- because
+ * the request names the people whose messages were read -- the read receipt
+ * the other end gets. wfc_clear_unread() writes it; nothing else should.
+ * The value is a millisecond timestamp in decimal, not a flag. */
+#define WFC_SETTING_CONVERSATION_SYNC   7
+/* Set to "1" by a client whose user turned receipts off. Read before
+ * reporting who was read: the account asked not to tell them. */
+#define WFC_SETTING_DISABLE_RECEIPT     13
 /* A deployment's own settings start here, so they cannot collide with a
  * scope WFC adds later. */
 #define WFC_SETTING_CUSTOM_BEGIN        1000
@@ -299,6 +313,37 @@ typedef struct {
 void wfc_conversation_setting_key(const wfc_conversation_t *conv, char *buf,
                                   size_t buf_size);
 bool wfc_conversation_from_setting_key(const char *key, wfc_conversation_t *out);
+
+/* --------------------------------------------------------------- receipts */
+
+/* How far the other side has got, which WFC keeps as two lists rather than as
+ * a flag on each message -- and the two are shaped differently, which is the
+ * thing to get right:
+ *
+ *   Delivery is per PERSON and not per conversation. The server keeps one
+ *   clock per user: "everything addressed to them up to this millisecond has
+ *   reached a client of theirs". So a message we sent at T is delivered when
+ *   that user's clock has passed T, whichever conversation it was in.
+ *
+ *   Read is per (conversation, person). Reading is something someone does to
+ *   a conversation, so a group has one of these per member and a single chat
+ *   has exactly one.
+ *
+ * Both are monotonic and both are only ever compared against a message's
+ * timestamp; neither says anything about a particular message, which is why
+ * there is nothing here to hang off wfc_message_t. RCP fills the first list,
+ * RDP the second, and both are gated on the deployment having receipts at all
+ * (WFC_COMMERCIAL_RECEIPT in wfc_route.h). */
+typedef struct {
+    char    uid[WFC_TARGET_MAX];
+    int64_t dt;
+} wfc_delivery_t;
+
+typedef struct {
+    wfc_conversation_t conversation;
+    char               uid[WFC_TARGET_MAX];
+    int64_t            dt;
+} wfc_read_entry_t;
 
 /* ---------------------------------------------------------- conversations */
 

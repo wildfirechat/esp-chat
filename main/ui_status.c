@@ -15,8 +15,10 @@
 #include <string.h>
 
 #include "esp_heap_caps.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 
+#include "app_cfg.h"
 #include "ui_page.h"
 #include "wfc_store.h"
 
@@ -49,6 +51,26 @@ static const char *const ROW_NAMES[ROW_COUNT] = {
 
 static lv_obj_t *s_value[ROW_COUNT];
 
+/* The two buttons at the bottom, and the one piece of state they need: when
+ * each was armed. Clearing the network or the account cannot be undone from
+ * the panel -- the board restarts into a QR code and needs a phone to get
+ * back -- so neither happens on one tap. The first tap arms the button and
+ * relabels it, and it disarms itself if the second tap does not come.
+ *
+ * A confirmation dialog would be the other way to do this, and it would cost
+ * a modal, a backdrop and two more Chinese strings on a screen where the
+ * finger is the only pointer; two taps says the same thing. */
+#define CONFIRM_WINDOW_MS 5000
+
+typedef struct {
+    lv_obj_t   *label;
+    const char *idle;
+    int64_t     armed_ms;
+} confirm_t;
+
+static confirm_t s_forget_wifi    = { .idle = "重新配网" };
+static confirm_t s_forget_account = { .idle = "退出登录" };
+
 /* Pushed in from the application; the UI task is the only writer. */
 static char s_wifi[48]    = "-";
 static char s_ip[24]      = "-";
@@ -79,6 +101,86 @@ void ui_status_set_account(const char *user_id)
     strlcpy(s_account, user_id != NULL && user_id[0] != '\0' ? user_id : "-",
             sizeof(s_account));
     ui_dirty(UI_DIRTY_STATUS);
+}
+
+/* ---------------------------------------------------------------- buttons */
+
+/* Runs on the LVGL task with the display lock held, like every other button
+ * callback here (ui_page.h), so the rule is the usual one: no blocking and no
+ * calls into the client. An NVS write is neither -- it is a few milliseconds
+ * of flash -- and what follows it is a restart, which ends the argument. */
+static bool armed(confirm_t *button)
+{
+    int64_t now = esp_timer_get_time() / 1000;
+
+    if (button->armed_ms != 0 && now - button->armed_ms < CONFIRM_WINDOW_MS) {
+        return true;
+    }
+
+    button->armed_ms = now;
+    lv_label_set_text(button->label, "再按一次");
+    lv_obj_set_style_text_color(button->label, lv_color_hex(UI_C_BAD), 0);
+    return false;
+}
+
+/* No wfc_client_disconnect() before either of these. It waits for the client's
+ * own tasks, and waiting for anything from a button callback is what freezes
+ * the panel; the server treats a board that vanishes the same way it treats
+ * one that said goodbye. */
+static void forget_wifi(lv_event_t *e)
+{
+    (void)e;
+
+    if (!armed(&s_forget_wifi)) {
+        return;
+    }
+    app_cfg_clear_wifi();
+    esp_restart();
+}
+
+static void forget_account(lv_event_t *e)
+{
+    (void)e;
+
+    if (!armed(&s_forget_account)) {
+        return;
+    }
+    app_cfg_clear_account();
+    esp_restart();
+}
+
+static void build_button(lv_obj_t *parent, confirm_t *button, lv_event_cb_t cb)
+{
+    lv_obj_t *btn = lv_button_create(parent);
+
+    lv_obj_set_height(btn, 28);
+    lv_obj_set_flex_grow(btn, 1);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(UI_C_RAISED), 0);
+    lv_obj_set_style_shadow_width(btn, 0, 0);
+    lv_obj_set_style_radius(btn, 4, 0);
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
+
+    button->label    = lv_label_create(btn);
+    button->armed_ms = 0;
+    lv_label_set_text(button->label, button->idle);
+    lv_obj_set_style_text_color(button->label, lv_color_hex(UI_C_DIM), 0);
+    lv_obj_center(button->label);
+}
+
+/* Called from the repaint, which is once a second here: a button that was
+ * armed and then left alone goes back to saying what it does. */
+static void disarm_stale(confirm_t *button)
+{
+    if (button->label == NULL || button->armed_ms == 0) {
+        return;
+    }
+    if (esp_timer_get_time() / 1000 - button->armed_ms < CONFIRM_WINDOW_MS) {
+        return;
+    }
+
+    button->armed_ms = 0;
+    lv_label_set_text(button->label, button->idle);
+    lv_obj_set_style_text_color(button->label, lv_color_hex(UI_C_DIM), 0);
 }
 
 /* ---------------------------------------------------------------- drawing */
@@ -133,6 +235,17 @@ static void create(lv_obj_t *parent)
 
         s_value[i] = value;
     }
+
+    lv_obj_t *buttons = lv_obj_create(list);
+
+    ui_style_flat(buttons);
+    lv_obj_set_size(buttons, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_top(buttons, 8, 0);
+    lv_obj_set_style_pad_column(buttons, 8, 0);
+    lv_obj_set_flex_flow(buttons, LV_FLEX_FLOW_ROW);
+
+    build_button(buttons, &s_forget_wifi, forget_wifi);
+    build_button(buttons, &s_forget_account, forget_account);
 }
 
 static void refresh(uint32_t dirty)
@@ -177,11 +290,18 @@ static void refresh(uint32_t dirty)
 
     unsigned uptime = (unsigned)(esp_timer_get_time() / 1000000);
     set(ROW_UPTIME, "%02u:%02u:%02u", uptime / 3600, uptime / 60 % 60, uptime % 60);
+
+    disarm_stale(&s_forget_wifi);
+    disarm_stale(&s_forget_account);
 }
 
 static void destroy(void)
 {
     memset(s_value, 0, sizeof(s_value));
+    s_forget_wifi.label       = NULL;
+    s_forget_wifi.armed_ms    = 0;
+    s_forget_account.label    = NULL;
+    s_forget_account.armed_ms = 0;
 }
 
 static void title(char *buf, size_t buf_size)

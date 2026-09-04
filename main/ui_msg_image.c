@@ -79,26 +79,30 @@ static void draw(lv_obj_t *parent, const ui_msg_row_t *row)
         lv_image_set_src(img, picture);
         lv_obj_set_style_radius(img, 8, 0);
         lv_obj_set_style_clip_corner(img, true, 0);
-        return;
+    } else {
+        lv_obj_t *frame = lv_obj_create(line);
+
+        ui_style_flat(frame);
+        lv_obj_set_size(frame, FRAME_W, FRAME_H);
+        lv_obj_set_style_bg_color(frame, lv_color_hex(UI_C_RAISED), 0);
+        lv_obj_set_style_bg_opa(frame, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(frame, 8, 0);
+        lv_obj_set_style_border_width(frame, 1, 0);
+        lv_obj_set_style_border_color(frame, lv_color_hex(UI_C_LINE), 0);
+        lv_obj_set_flex_flow(frame, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(frame, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER);
+
+        lv_obj_t *icon = lv_label_create(frame);
+
+        lv_obj_set_style_text_color(icon, lv_color_hex(UI_C_DIM), 0);
+        lv_label_set_text(icon, LV_SYMBOL_IMAGE);
     }
 
-    lv_obj_t *frame = lv_obj_create(line);
-
-    ui_style_flat(frame);
-    lv_obj_set_size(frame, FRAME_W, FRAME_H);
-    lv_obj_set_style_bg_color(frame, lv_color_hex(UI_C_RAISED), 0);
-    lv_obj_set_style_bg_opa(frame, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(frame, 8, 0);
-    lv_obj_set_style_border_width(frame, 1, 0);
-    lv_obj_set_style_border_color(frame, lv_color_hex(UI_C_LINE), 0);
-    lv_obj_set_flex_flow(frame, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(frame, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER);
-
-    lv_obj_t *icon = lv_label_create(frame);
-
-    lv_obj_set_style_text_color(icon, lv_color_hex(UI_C_DIM), 0);
-    lv_label_set_text(icon, LV_SYMBOL_IMAGE);
+    /* Last, like every view: the picture and the frame are the same message,
+     * and "did they see it" belongs under both (ui_msg_view.h). The early
+     * return this used to have is what the if/else replaced. */
+    ui_msg_receipt(line, row);
 }
 
 const ui_msg_view_t ui_msg_view_image = {

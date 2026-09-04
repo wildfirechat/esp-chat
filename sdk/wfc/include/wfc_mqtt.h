@@ -156,6 +156,14 @@ typedef struct {
     uint32_t connect_timeout_ms; /* 0 -> 20000 */
     uint32_t request_timeout_ms; /* 0 -> 20000, matching WFC.js */
 
+    /* Treat one expired request as proof the link is dead: fail the rest,
+     * report WFC_MQTT_DISCONNECTED and end the read loop, which is what
+     * WFC.js does (wfcImpl.js:1761). Off by default because it is a policy,
+     * and it only makes sense for a caller that reconnects. Worth having:
+     * the keepalive alone needs two periods -- nearly seven minutes at the
+     * default 200 s -- to notice a half-open link. */
+    bool drop_on_request_timeout;
+
     wfc_mqtt_push_cb_t  on_push;
     void               *push_ud;
     wfc_mqtt_state_cb_t on_state;
@@ -178,8 +186,17 @@ esp_err_t wfc_mqtt_start(const wfc_mqtt_config_t *cfg);
 esp_err_t wfc_mqtt_wait_connected(uint32_t timeout_ms, wfc_connect_ack_t *ack);
 
 /* Sends DISCONNECT if the link is up, then tears the task down. Blocks until
- * the task is gone; safe to call when not started. Never call from a callback. */
-void wfc_mqtt_stop(void);
+ * the task is gone; safe to call when not started. Never call from a callback.
+ *
+ *   ESP_OK           stopped, buffers released
+ *   ESP_ERR_TIMEOUT  the read loop had not let go within the ceiling below
+ *
+ * The timeout is not a failure to act on: the loop does exit, it just took
+ * longer than this call was willing to wait, and the next wfc_mqtt_start()
+ * collects what it left behind. The one thing a caller with no next start()
+ * -- a disconnect() -- should do with it is say so, because until then the
+ * receive buffer and a copy of the private secret are still allocated. */
+esp_err_t wfc_mqtt_stop(void);
 
 bool wfc_mqtt_is_connected(void);
 

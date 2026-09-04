@@ -92,7 +92,7 @@ static bool take_url(const wfc_message_t *msg, void *ud)
  * growing buffer: this runs with a TLS session open on a board whose internal
  * heap is the scarce one, and "how big is it" is a question worth having
  * answered before committing. Every file server WFC ships with answers it. */
-static uint8_t *download(const char *url, size_t *out_len)
+uint8_t *ui_media_download(const char *url, size_t *out_len)
 {
     esp_http_client_config_t cfg = {
         .url               = url,
@@ -131,7 +131,7 @@ static uint8_t *download(const char *url, size_t *out_len)
         esp_http_client_close(http);
     }
     if (length <= 0 || length > MAX_BYTES) {
-        ESP_LOGW(TAG, "picture is %lld bytes, cap is %d", (long long)length, MAX_BYTES);
+        ESP_LOGW(TAG, "%s is %lld bytes, cap is %d", url, (long long)length, MAX_BYTES);
         goto done;
     }
 
@@ -290,18 +290,28 @@ static void settle(int64_t uid, uint8_t *pixels, const lv_image_dsc_t *dsc)
     }
 }
 
-static void fetch(int64_t uid)
+char *ui_media_url(int64_t message_uid)
 {
     char *url = NULL;
 
-    if (!wfc_get_message(uid, take_url, &url) || url == NULL) {
+    if (!wfc_get_message(message_uid, take_url, &url)) {
+        return NULL;
+    }
+    return url;
+}
+
+static void fetch(int64_t uid)
+{
+    char *url = ui_media_url(uid);
+
+    if (url == NULL) {
         ESP_LOGW(TAG, "message %lld has no picture to fetch", (long long)uid);
         settle(uid, NULL, NULL);
         return;
     }
 
     size_t   len  = 0;
-    uint8_t *jpeg = download(url, &len);
+    uint8_t *jpeg = ui_media_download(url, &len);
 
     wfc_free(url);
     if (jpeg == NULL) {

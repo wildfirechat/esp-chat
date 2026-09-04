@@ -4,13 +4,20 @@
  * reached from the nav bar, and the rest pushed on top of them and reached by
  * tapping something.
  *
- *   会话    the conversation list        home
- *   联系人  the friend list              home
- *   状态    what the board is doing      home
- *   日志    the message log              home
- *   chat    one conversation             pushed from 会话, or from a contact
- *   写      the composer                 pushed from chat
- *   contact one person                   pushed from 联系人
+ *   会话      the conversation list      home
+ *   联系人    the friend list            home
+ *   状态      what the board is doing    home
+ *   日志      the message log            home
+ *   chat      one conversation           pushed from 会话, or from a contact
+ *   对讲      push-to-talk on one channel pushed from chat
+ *   写        the composer               pushed from chat, and from anything
+ *                                        else that needs a line of text
+ *   contact   one person                 pushed from 联系人
+ *   新的好友  friend requests            pushed from 联系人
+ *   群        one group                  pushed from a group's chat
+ *   选人      pick people                pushed from 联系人 and from 群
+ *   配网      the WiFi a board has none of   setup: shown instead of all of
+ *   扫码登录  the account it has none of     the above, before there is one
  *
  * A page is four functions and no state that outlives its widgets. create()
  * builds the tree, refresh() fills it from the store, destroy() forgets the
@@ -102,6 +109,9 @@
 #define UI_DIRTY_CALL     (1u << 5)   /* a call started, changed state or ended */
 #define UI_DIRTY_FRIENDS  (1u << 6)   /* the friend list moved */
 #define UI_DIRTY_MEDIA    (1u << 7)   /* a picture finished loading */
+#define UI_DIRTY_REQUESTS (1u << 8)   /* a friend request arrived or was answered */
+#define UI_DIRTY_SETUP    (1u << 9)   /* 配网 / 扫码登录 moved a step (ui_setup.h) */
+#define UI_DIRTY_PTT      (1u << 10)  /* somebody started or stopped talking */
 #define UI_DIRTY_ALL      0xFFFFFFFFu
 
 void ui_dirty(uint32_t bits);
@@ -115,8 +125,15 @@ typedef enum {
     UI_PAGE_LOG,
     UI_PAGE_CHAT,
     UI_PAGE_CONTACT,
+    UI_PAGE_REQUESTS,
+    UI_PAGE_GROUP,
+    UI_PAGE_PICK,
     UI_PAGE_COMPOSE,
+    UI_PAGE_RECORD,
     UI_PAGE_CALL,
+    UI_PAGE_PTT,
+    UI_PAGE_PROVISION,
+    UI_PAGE_LOGIN,
     UI_PAGE_COUNT,
 } ui_page_id_t;
 
@@ -132,6 +149,11 @@ typedef struct {
     void (*title)(char *buf, size_t buf_size);
     /* Home pages sit under the nav bar and have no back arrow. */
     bool home;
+    /* A setup page has neither -- no nav bar and no back arrow. 配网 and
+     * 扫码登录 are shown before there is a client to navigate around, so
+     * there is nowhere for a back arrow to go; the boot path navigates away
+     * from them itself once the exchange it is running finishes. */
+    bool setup;
 } ui_page_def_t;
 
 /* Both are queue posts: safe from a button callback on the LVGL task, safe
@@ -148,25 +170,71 @@ ui_page_id_t ui_current_page(void);
 extern const ui_page_def_t ui_page_convs;
 extern const ui_page_def_t ui_page_contacts;
 extern const ui_page_def_t ui_page_contact;
+extern const ui_page_def_t ui_page_requests;
+extern const ui_page_def_t ui_page_group;
+extern const ui_page_def_t ui_page_pick;
 extern const ui_page_def_t ui_page_chat;
 extern const ui_page_def_t ui_page_compose;
+extern const ui_page_def_t ui_page_record;
 extern const ui_page_def_t ui_page_status;
 extern const ui_page_def_t ui_page_log;
 extern const ui_page_def_t ui_page_call;
+extern const ui_page_def_t ui_page_ptt;
+extern const ui_page_def_t ui_page_provision;
+extern const ui_page_def_t ui_page_login;
 
 /* ui_convs.c -> ui_chat.c, and ui_contact.c -> ui_chat.c. Sets the
  * conversation and navigates to it. */
 void ui_chat_open(const wfc_conversation_t *conv);
 
-/* ui_contacts.c -> ui_contact.c. A user ID is the whole of what the contact
- * page is told; everything it draws it reads from the store itself. */
+/* ui_contacts.c -> ui_contact.c, and 新的好友 -> ui_contact.c. A user ID is
+ * the whole of what the contact page is told; everything it draws it reads
+ * from the store itself. */
 void ui_contact_open(const char *user_id);
+
+/* ui_chat.c -> ui_group.c. Same contract, one group. */
+void ui_group_open(const char *group_id);
+
+/* Choosing people, which three flows need and none of them owns: making a
+ * group out of contacts, inviting contacts into a group, and taking members
+ * out of one. So it is one page with a source and a callback, the same way
+ * the composer is one page for every line of text this panel collects.
+ *
+ * `group` means different things to the two sources and both are the useful
+ * meaning: with UI_PICK_FRIENDS it is a group whose existing members should
+ * NOT be offered (NULL offers everyone), and with UI_PICK_GROUP_MEMBERS it is
+ * the group whose roster is the list. Either way this account is never in it.
+ *
+ * `on_done` runs on the LVGL task with the display lock held, like every
+ * other button callback here, so it may only copy the selection somewhere and
+ * let the caller's prime() send it. The array dies with the call. */
+typedef enum {
+    UI_PICK_FRIENDS = 0,
+    UI_PICK_GROUP_MEMBERS,
+} ui_pick_source_t;
+
+/* As many as one screenful of taps can sensibly choose, and comfortably under
+ * the client's WFC_OP_MEMBERS_MAX. */
+#define UI_PICK_MAX 16
+
+typedef void (*ui_pick_cb_t)(const char *const *uids, size_t n);
+
+void ui_pick_open(const char *title, ui_pick_source_t source, const char *group,
+                  ui_pick_cb_t on_done);
 
 /* ui_chat.c -> ui_compose.c. The composer is deliberately not told what a
  * conversation is: it collects text and hands it back. Voice, when it comes,
  * is another page with this same signature and nothing else changes. */
 typedef void (*ui_compose_cb_t)(const char *text);
 void ui_compose_open(const char *title, ui_compose_cb_t on_send);
+
+/* The composer's shape for something that is not text. `amr` is a complete
+ * AMR-NB file and the callback OWNS it -- it frees it with wfc_free() once it
+ * has been uploaded, which is why the callback parks it rather than sending
+ * from where it is called (ui_chat.c). `seconds` is what goes in the
+ * message's duration field. */
+typedef void (*ui_record_cb_t)(uint8_t *amr, size_t len, int seconds);
+void ui_record_open(const char *title, ui_record_cb_t on_done);
 
 /* ------------------------------------------------------------ the calls
  *
@@ -229,6 +297,39 @@ void ui_call_open(void);
  * back to ui_call_set_end_reason(). */
 void ui_call_post_end_reason(const char *why);   /* any task; ui.c */
 void ui_call_set_end_reason(const char *text);   /* UI task; ui_call.c */
+
+/* ------------------------------------------------------------ 对讲
+ *
+ * Push-to-talk, and it is optional in exactly the way calls are: the SDK is a
+ * separate module (../wfptt-esp) and CONFIG_APP_PTT=n compiles ui_ptt_none.c
+ * in place of ui_ptt.c and app_ptt.c. One header, two implementations,
+ * exactly one compiled -- so the chat page has no #ifdef in it and wfptt.h is
+ * named in two files, neither of which is this one.
+ *
+ * It is NOT the same switch as calls, and that is the point of having two: a
+ * talk needs the microphone and the long link, and nothing else. A build with
+ * CONFIG_APP_CALL=n -- no WebRTC, no Opus, 2.4 MB rather than 4.9 -- can still
+ * be a walkie-talkie. */
+
+/* Whether this build can talk at all. A compile-time fact, reached through a
+ * function so that the callers do not have to know that. */
+bool ui_ptt_available(void);
+
+/* ui_chat.c -> ui_ptt.c. Open the channel for this conversation.
+ *
+ * Unlike ui_call_dial() this starts nothing: the page is where the button is,
+ * and the button is what talks. Safe from an LVGL callback -- it is a queue
+ * post like every other navigation. */
+void ui_ptt_open(const wfc_conversation_t *conv);
+
+/* Talking, or hearing somebody. The chat page colours its 对讲 button with
+ * it, the same way it colours the phone with ui_call_busy(); listening is
+ * global, so this can be true with the channel's own page nowhere in
+ * sight. */
+bool ui_ptt_busy(void);
+
+/* ui_ptt_start(), which brings the SDK up, is in ui.h with the other things
+ * app_main.c calls. */
 
 /* ui.c -> ui_status.c, ui_log.c: the facts the app pushes in. */
 void ui_status_set_wifi(const char *ssid, int rssi);

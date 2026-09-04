@@ -93,6 +93,17 @@ typedef struct {
     bool    mine;
     bool    notice;                 /* a notification type: centred, no bubble */
     bool    group;                  /* the conversation, not the message */
+    /* How far the other side has got, for our own messages only -- the
+     * envelope again, not the type: every message we send has one and no type
+     * has a different idea of what it means.
+     *
+     * `receipt` is a wfc_receipt_t and is the single-chat answer; `read_by`
+     * is the group one, how many people have read this far. Filled while
+     * reading the store, because that is where the lookup is cheap and where
+     * blocking is allowed -- draw() may read the store but is called once per
+     * message per repaint, which is the wrong place for two more queries. */
+    int8_t  receipt;
+    uint8_t read_by;
 } ui_msg_row_t;
 
 /* One type's view. */
@@ -110,6 +121,15 @@ bool ui_msg_view_draw(lv_obj_t *parent, const ui_msg_row_t *row);
 /* WFC's image type (3). ui_msg_image.c. */
 extern const ui_msg_view_t ui_msg_view_image;
 
+/* WFC's voice type (2). ui_msg_voice.c. */
+extern const ui_msg_view_t ui_msg_view_voice;
+
+/* Push-to-talk's voice type (23), which is the same view -- see the bottom of
+ * ui_msg_voice.c. Present in every build, including the ones that cannot
+ * talk. */
+extern const ui_msg_view_t ui_msg_view_ptt_sound;
+
+
 /* --------------------------------------------------------------- helper */
 
 /* The container a message sits in: full width, its content pushed to our side
@@ -117,5 +137,16 @@ extern const ui_msg_view_t ui_msg_view_image;
  * bubble -- getting the alignment wrong is what makes a message look like it
  * came from the wrong person. */
 lv_obj_t *ui_msg_line(lv_obj_t *parent, const ui_msg_row_t *row);
+
+/* The receipt mark, under our own messages: 已读 / 已送达, or 「N 人已读」 in a
+ * group. Every view ENDS with one of these, the same way it starts with a
+ * line, and it draws nothing at all for someone else's message, for a
+ * deployment without receipts, or before anyone has got there -- so a view
+ * calls it unconditionally and does not have to know which of those it is.
+ *
+ * It is here rather than in the page because a picture wants it as much as a
+ * bubble does: "did they see it" is a question about the message, not about
+ * what the message contains. */
+void ui_msg_receipt(lv_obj_t *line, const ui_msg_row_t *row);
 
 #endif /* UI_MSG_VIEW_H */

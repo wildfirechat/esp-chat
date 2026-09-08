@@ -42,12 +42,19 @@
  * UNCONNECTED, then CONNECTING on each attempt, then CONNECTED, and the
  * catch-up that follows is the ordinary one, a delta from the stored head.
  *
- * Three answers are not retried, because repeating the request cannot change
- * them: a token the server will not accept, an identity it rejects, and ROFL
- * -- another client took the session, and dialling again would take it back
- * off them. Those stop the retry loop and stay on the status, so a screen can
- * say which one happened; calling wfc_client_connect() again is then an
- * explicit decision, which is the point.
+ * Five answers are not retried, because repeating the request cannot change
+ * them: a token the server will not accept, a token that is not this client
+ * ID's, an account it has blocked, a deployment whose licence will not have
+ * us, and ROFL -- another client took the session, and dialling again would
+ * take it back off them. Those stop the retry loop and stay on the status, so
+ * a screen can say which one happened; calling wfc_client_connect() again is
+ * then an explicit decision, which is the point.
+ *
+ * WFC_STATUS_TIME_INCONSISTENT is the one refusal that IS retried, and it is
+ * a deliberate departure from the phone clients. A board's clock is wrong for
+ * one reason -- SNTP has not landed yet -- and it fixes itself a few seconds
+ * later, so a client that gave up on the first attempt would need a power
+ * cycle to recover from a race it was always going to win.
  */
 
 #ifndef WFC_CLIENT_H
@@ -70,20 +77,34 @@ extern "C" {
 
 /* ---------------------------------------------------------------- status */
 
-/* connectionStatus.js, kept to the values this client can actually reach.
- * Negative is a failure that will not resolve itself. */
+/* connectionStatus.js, value for value -- an application that already knows
+ * WFC's numbers can compare against them, and a status this client does not
+ * produce is a hole in the list rather than a number that means something
+ * else here. Negative is a failure.
+ *
+ * Most of them come from /route's status byte rather than from the long
+ * link (wfc_route.h), which is the same place WFC.js gets them
+ * (wfcImpl.js:843-856) and proto2 does (business.cc:585-597). */
 typedef enum {
-    WFC_STATUS_KICKED_OFF     = -7,  /* another client took this account's session */
-    WFC_STATUS_TOKEN_INCORRECT = -5,
-    WFC_STATUS_SERVER_DOWN    = -4,  /* /route or the long link would not come up */
-    WFC_STATUS_REJECTED       = -3,  /* the server refused the CONNECT */
-    WFC_STATUS_UNCONNECTED    = -1,
-    WFC_STATUS_CONNECTING     = 0,
-    WFC_STATUS_CONNECTED      = 1,   /* working; everything is available */
+    WFC_STATUS_TIME_INCONSISTENT   = -9, /* our clock is too far from the server's */
+    WFC_STATUS_NOT_LICENSED        = -8, /* the licence will not have this client */
+    WFC_STATUS_KICKED_OFF          = -7, /* another client took the session */
+    /* The token is not this client ID's -- the first thing to check when a
+     * board that worked yesterday stops connecting, since the app server
+     * issues the two together and a token pasted next to somebody else's
+     * client ID looks exactly like this. */
+    WFC_STATUS_SECRET_KEY_MISMATCH = -6,
+    WFC_STATUS_TOKEN_INCORRECT     = -5,
+    WFC_STATUS_SERVER_DOWN         = -4, /* /route or the long link would not come up */
+    WFC_STATUS_REJECTED            = -3, /* the account is blocked, or CONNECT refused */
+    WFC_STATUS_LOGOUT              = -2, /* disconnect(); nothing is retrying */
+    WFC_STATUS_UNCONNECTED         = -1,
+    WFC_STATUS_CONNECTING          = 0,
+    WFC_STATUS_CONNECTED           = 1,  /* working; everything is available */
     /* Connected and catching up. Messages are arriving in batches and the
      * conversation list is still moving, so a UI can say so rather than
      * flickering through a hundred redraws. */
-    WFC_STATUS_RECEIVING      = 2,
+    WFC_STATUS_RECEIVING           = 2,
 } wfc_connection_status_t;
 
 const char *wfc_status_str(wfc_connection_status_t status);
@@ -105,7 +126,13 @@ typedef struct {
      * a store wiped because the account changed, or any boot at all with
      * CONFIG_WFC_STORE_RAM. false starts from the CONNACK head, so only
      * messages sent from now on arrive; true starts from 0 and pulls whatever
-     * roaming history the server kept. */
+     * roaming history the server kept.
+     *
+     * true is what an application with a conversation list wants. There is no
+     * conversation list on the wire to fetch -- the list is a projection of
+     * the message table, maintained as each message is stored -- so a login
+     * that pulls nothing has no conversations either, and the list fills only
+     * when somebody sends something. */
     bool pull_history;
 
     /* Consecutive MP round trips before the catch-up gives up and waits for
@@ -320,7 +347,11 @@ esp_err_t wfc_get_conversations(size_t limit, wfc_store_conversation_cb_t cb, vo
 bool wfc_get_conversation_info(const wfc_conversation_t *conv,
                                wfc_conversation_info_t *out);
 
-/* The badge: every conversation's unread and mention counts, summed. */
+/* The badge: every conversation's unread and mention counts, summed.
+ *
+ * The count is the ACCOUNT's, not the board's: a conversation read on the
+ * phone comes down here too, when the read mark that says so arrives. It
+ * arrives as a conversation-update event, like every other change to a row. */
 uint32_t wfc_get_unread_count(void);
 
 /* Marks a conversation read: the counters go to zero, a conversation-update

@@ -204,18 +204,27 @@ menu "Chat app"
 
     config WFC_PULL_HISTORY
         bool "Pull message history on first connect"
-        default n
+        default y
         help
             Only consulted when the local store has no head yet: a first boot,
             a store wiped because the account changed, or any boot at all with
             CONFIG_WFC_STORE_RAM. With a head in the store the client resumes
             from it and this setting does not come up.
 
-            n starts at the head the CONNACK reports: only messages sent from
-            now on arrive. y starts at 0 and pulls whatever roaming history
-            the server kept, which fills the screen without waiting for
-            someone to type -- useful while bringing a board up. Bounded by
-            the pull-round limit in wfc_impl.c either way, so a busy account
-            cannot pull forever.
+            y starts at 0 and pulls whatever roaming history the server kept.
+            That is what gives a board that has just logged in a conversation
+            list at all: the list is a projection of the message table
+            (touch_conversation() in wfc_store.c), so with no messages there
+            are no conversations, and the 会话 page stays empty until somebody
+            types. Pulling the roaming window is also what every other client
+            does on a fresh install, which is why it is the default.
+
+            n starts at the head the CONNACK reports instead: only messages
+            sent from now on arrive. Pick it for a board that only has to show
+            live traffic.
+
+            Bounded either way by the pull-round limit in wfc_impl.c, so a
+            busy account cannot pull forever -- and by the server's retention
+            window, which is how far back "roaming" reaches in the first place.
 
 endmenu

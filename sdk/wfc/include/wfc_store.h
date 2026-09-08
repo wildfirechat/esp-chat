@@ -64,6 +64,15 @@ typedef struct {
      * heads in it index another account's timeline, and pulling from them
      * would silently skip messages. */
     const char *user_id;
+
+    /* The key the database file is encrypted with, when this build encrypts
+     * it (CONFIG_WFC_STORE_ENCRYPT): dbSecret, the third segment of the
+     * app-server token. wfc_client_init() fills it in -- the token decrypts
+     * locally, so the store can be keyed before the network is up.
+     *
+     * A build without encryption ignores it. A build with encryption and
+     * nothing here fails to open rather than quietly writing plaintext. */
+    const char *db_secret;
 } wfc_store_config_t;
 
 /* Mounts (SQLite) or allocates (RAM) and makes the store usable. Idempotent
@@ -218,7 +227,11 @@ uint32_t wfc_store_total_unread(void);
 
 /* Marks a conversation read: both counters to zero. Purely local -- telling
  * the server, so the other end and this account's other devices agree, is
- * wfc_clear_unread() in wfc_client.h, which calls this and then reports. */
+ * wfc_clear_unread() in wfc_client.h, which calls this and then reports.
+ *
+ * The other direction, a read done on another device, needs no call at all:
+ * it arrives as a WFC_SETTING_CONVERSATION_SYNC row and is applied by the put
+ * above. */
 esp_err_t wfc_store_clear_unread(const wfc_conversation_t *conv);
 
 /* Forgets a conversation and the messages in it. Used when the server says a
@@ -326,11 +339,14 @@ esp_err_t wfc_store_query_friend_requests(size_t limit,
  * to the board, and a client that dropped them would show a different picture
  * from the phone next to it after a round trip.
  *
- * Two conversation scopes are more than storage: putting a
+ * Three conversation scopes are more than storage: putting a
  * WFC_SETTING_CONVERSATION_TOP or _SILENT row updates the conversation row it
- * names, the same way putting a message does. That is why the projection
- * lives here rather than in the business layer -- one place, both backends,
- * and the list cannot disagree with the settings that produced it. */
+ * names, the same way putting a message does, and a _SYNC row -- this
+ * account's read position, written by whichever device last opened the
+ * conversation -- recounts that row's unread, which is how a conversation
+ * read on the phone loses its badge here. That is why the projection lives
+ * here rather than in the business layer -- one place, both backends, and the
+ * list cannot disagree with the settings that produced it. */
 esp_err_t wfc_store_put_user_settings(const wfc_user_setting_t *settings, size_t n);
 
 /* False when the account has no such setting, leaving `out` untouched. */

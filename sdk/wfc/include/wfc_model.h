@@ -274,7 +274,13 @@ typedef struct {
  * here", which is both the account's own multi-device state and -- because
  * the request names the people whose messages were read -- the read receipt
  * the other end gets. wfc_clear_unread() writes it; nothing else should.
- * The value is a millisecond timestamp in decimal, not a flag. */
+ * The value is a millisecond timestamp in decimal, not a flag.
+ *
+ * It is read in both directions. One arriving was written by another device
+ * this account is logged in on -- the phone, opening a conversation this
+ * board is showing a badge for -- so the store takes the badge down from it
+ * (wfc_store.h). That is the whole of "the unread count is the account's, not
+ * the board's". */
 #define WFC_SETTING_CONVERSATION_SYNC   7
 /* Set to "1" by a client whose user turned receipts off. Read before
  * reporting who was read: the account asked not to tell them. */

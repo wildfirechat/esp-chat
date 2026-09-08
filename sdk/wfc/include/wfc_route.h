@@ -7,12 +7,12 @@
  * Reference: WFC.js/lib/connect/index.js:59-270.
  *
  * Wire shape, since it is not symmetric and is easy to get subtly wrong:
- *   request  headers  p / appId / appKey, plus cid and uid encrypted under the
- *                     *root* key
+ *   request  headers  cid and uid, encrypted under the *root* key. No p /
+ *                     appId / appKey: those are the Web path's, see
+ *                     wfc_platform.h
  *   request  body     base64(AES(IMHttpWrapper{...RouteRequest}, privateSecret))
- *   response body     [1 byte status][AES(RouteResponse, privateSecret)],
- *                     base64-wrapped only for the web/wx `p` headers -- see
- *                     WFC_ROUTE_RESPONSE_BASE64 in wfc_platform.h
+ *   response body     [1 byte status][AES(RouteResponse, privateSecret)], raw
+ *                     -- the server base64-wraps it only for a web/wx `p`
  *
  * RouteRequest.host is itself root-key encrypted and must name the same host
  * that later goes into the MQTT will-topic, or the broker rejects CONNECT.
@@ -54,6 +54,23 @@ extern "C" {
 #define WFC_COMMERCIAL_NO_GROUP_RECEIPT     0x2000
 #define WFC_COMMERCIAL_MESH                 0x8000
 
+/* The first byte of the response, which is an errorCode.js value and is the
+ * only place several connection statuses come from: the long link never sees
+ * these, because a client the route turned away never dials it.
+ *
+ * Named here rather than in wfc_mqtt.h with the reply codes because these are
+ * the ones that end a session rather than fail a request -- ErrorCode.java,
+ * RouteAction.java:56-153 and MemorySessionStore.java:533-555 between them
+ * can answer any of the six below. Anything else is a server that is having a
+ * bad day and is worth asking again. */
+#define WFC_ROUTE_OK                  0
+#define WFC_ROUTE_SECRET_KEY_MISMATCH 1   /* the token is not this client ID's */
+#define WFC_ROUTE_TOKEN_ERROR         6
+#define WFC_ROUTE_KICKED_OFF          7   /* the session went to another client */
+#define WFC_ROUTE_NOT_LICENSED        22
+#define WFC_ROUTE_TIME_INCONSISTENT   30  /* our clock is too far from the server's */
+#define WFC_ROUTE_USER_BLOCKED        245
+
 #define WFC_HOST_MAX 128
 #define WFC_NODE_MAX 32
 
@@ -69,6 +86,12 @@ typedef struct {
 } wfc_route_config_t;
 
 typedef struct {
+    /* The server's answer byte, WFC_ROUTE_* above. Written whether or not the
+     * exchange worked, so a caller that got an error can say WHICH one --
+     * "the token is not this client ID's" and "the server is down" are the
+     * same esp_err_t and want opposite reactions. 0 when we never got as far
+     * as an answer. */
+    int32_t  status;
     char     host[WFC_HOST_MAX]; /* long-link host, usually a node subdomain */
     char     node[WFC_NODE_MAX]; /* node id; part of the MQTT will-topic */
     uint16_t long_port;          /* MQTT over TCP on the native platforms */
@@ -86,6 +109,9 @@ typedef struct {
  * A community-edition server is a warning, not a failure (decision D4): this
  * client is on the native TCP path, which community servers do serve. Read
  * `commercial` if you need to know which optional features exist.
+ *
+ * `out` is zeroed on entry and out->status is set from the response, so it is
+ * readable on the error paths too.
  */
 esp_err_t wfc_route(const wfc_route_config_t *cfg,
                     wfc_token_t *token_out,

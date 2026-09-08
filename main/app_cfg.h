@@ -15,6 +15,11 @@
  *   user_id / token             set by 扫码登录 (app_login.h), which needs
  *                               the WiFi to already work
  *
+ * The seeding happens on a store that is blank, not on one that is empty:
+ * NVS also remembers that a pair was cleared on purpose, so a board that has
+ * been told to forget its account does not come back up as whoever
+ * sdkconfig.local names. Only erasing NVS puts the build's values back.
+ *
  * plus client_id, which is neither: it is decided once, on the first boot,
  * and then never changes for the life of the board -- because the token is
  * minted FOR a client ID and a board that derives a new one has thrown its
@@ -77,7 +82,12 @@ esp_err_t app_cfg_set_account(const char *user_id, const char *token);
 
 /* 重新配网 / 退出登录. Each clears its own pair and nothing else -- forgetting
  * an account is not a reason to forget the network it was reached over. The
- * caller restarts the board; there is no way to unwind a connected client. */
+ * caller restarts the board; there is no way to unwind a connected client.
+ *
+ * The clear survives that restart even on a board built with credentials in
+ * sdkconfig.local: it is recorded as deliberate, and a deliberate empty is
+ * not re-seeded. So 退出登录 really does land on the 扫码登录 QR code, and
+ * the way back to the build's own account is `idf.py erase-flash`. */
 esp_err_t app_cfg_clear_wifi(void);
 esp_err_t app_cfg_clear_account(void);
 

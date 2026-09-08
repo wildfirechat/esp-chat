@@ -118,9 +118,10 @@ typedef void (*wfc_on_friend_request_update_t)(size_t n, void *ud);
  * when UG delivers a batch and when this client's own UP is acknowledged, so
  * a screen showing a setting does not need to know which happened.
  *
- * A setting that pins or mutes a conversation ALSO raises a
- * conversation-update for that conversation, so a list that already redraws
- * on that event needs nothing from this one. */
+ * A setting that pins, mutes, or says how far this account has read a
+ * conversation ALSO raises a conversation-update for that conversation, so a
+ * list that already redraws on that event needs nothing from this one -- a
+ * badge cleared on the phone included. */
 typedef void (*wfc_on_user_settings_update_t)(size_t n, void *ud);
 
 /* Receipts that just landed and are now in the store: how far the people we

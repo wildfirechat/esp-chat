@@ -9,16 +9,16 @@
 
 | 模块 | 内容 | 归档 | 源码版本 |
 |---|---|---|---|
-| [wfc/](./wfc/) | IM 客户端：协议、存储、模型、事件 | `lib/libwfc.a` 2884 KB | 0df238a 2026-09-04 |
+| [wfc/](./wfc/) | IM 客户端：协议、存储、模型、事件 | `lib/libwfc.a` 2912 KB | cf9f966 2026-09-08 |
 | [wfav/](./wfav/) | 音视频 SDK：通话信令、WebRTC、Opus | `lib/libwfav.a` 214 KB | 85b27ce 2026-09-02 |
 | [wfptt/](./wfptt/) | 对讲 SDK：频道、抢麦、AMR-NB 分片 | `lib/libwfptt.a` 67 KB | 0df238a 2026-09-04 |
 
 ```
 target      esp32s3
 IDF         v6.1.0
-打包日期     2026-09-04
+打包日期     2026-09-08
 sha256
-    wfc   70d8abc521c989bad609dea03844ae09cf102094b865c3241160f9f9f9c547d4
+    wfc   caeddfced68c407275da67d24e5204296da1754979f00d76c663dc1c91ef3511
     wfav  1fdd6363cdeb7e4001872343f6115a231e389fd00c0803395f29b3712facfae9
     wfptt 1a063cfaf50bae9ca2cb8b020352deb92325492ec704e653d4b0503841b0c837
 ```
@@ -40,6 +40,7 @@ sha256
 | 选项 | 打包时的值 |
 |---|---|
 | `CONFIG_SQLITE3_BUILD` | `true` |
+| `CONFIG_SQLITE3_ENCRYPT` | `true` |
 | `CONFIG_WFAV_AUDIO_AEC` | `true` |
 | `CONFIG_WFAV_AUDIO_CHANNELS` | `1` |
 | `CONFIG_WFAV_AUDIO_SAMPLE_RATE` | `16000` |
@@ -50,6 +51,7 @@ sha256
 | `CONFIG_WFAV_TURN_PASSWORD` | `wfchatpwd` |
 | `CONFIG_WFAV_TURN_URL` | `turn:turn.wildfirechat.net:3478` |
 | `CONFIG_WFAV_TURN_USER` | `wfchat` |
+| `CONFIG_WFC_STORE_ENCRYPT` | `true` |
 | `CONFIG_WFC_STORE_MAX_CONVERSATIONS` | `64` |
 | `CONFIG_WFC_STORE_MAX_DATA` | `1024` |
 | `CONFIG_WFC_STORE_MAX_GROUP_MEMBERS` | `128` |

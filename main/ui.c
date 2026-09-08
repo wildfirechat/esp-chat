@@ -551,14 +551,18 @@ static void on_connection_status(int status, void *ud)
     (void)ud;
 
     static const struct { int status; const char *text; bool ok; } TEXTS[] = {
-        { WFC_STATUS_CONNECTING,      "连接服务器",       false },
-        { WFC_STATUS_CONNECTED,       "已连接",           true  },
-        { WFC_STATUS_RECEIVING,       "同步中",           true  },
-        { WFC_STATUS_KICKED_OFF,      "被踢下线",         false },
-        { WFC_STATUS_TOKEN_INCORRECT, "token 不对",       false },
-        { WFC_STATUS_SERVER_DOWN,     "服务器连不上",     false },
-        { WFC_STATUS_REJECTED,        "服务器拒绝了连接", false },
-        { WFC_STATUS_UNCONNECTED,     "已断开",           false },
+        { WFC_STATUS_CONNECTING,          "连接服务器",       false },
+        { WFC_STATUS_CONNECTED,           "已连接",           true  },
+        { WFC_STATUS_RECEIVING,           "同步中",           true  },
+        { WFC_STATUS_KICKED_OFF,          "被踢下线",         false },
+        { WFC_STATUS_TOKEN_INCORRECT,     "token 不对",       false },
+        { WFC_STATUS_SECRET_KEY_MISMATCH, "会话密钥不匹配",   false },
+        { WFC_STATUS_NOT_LICENSED,        "服务器未授权",     false },
+        { WFC_STATUS_TIME_INCONSISTENT,   "时间不同步",       false },
+        { WFC_STATUS_SERVER_DOWN,         "服务器连不上",     false },
+        { WFC_STATUS_REJECTED,            "服务器拒绝了连接", false },
+        { WFC_STATUS_UNCONNECTED,         "已断开",           false },
+        { WFC_STATUS_LOGOUT,              "已退出登录",       false },
     };
 
     for (size_t i = 0; i < sizeof(TEXTS) / sizeof(TEXTS[0]); i++) {

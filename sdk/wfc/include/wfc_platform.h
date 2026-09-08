@@ -17,46 +17,32 @@
  *   2. The WEB/WX branch also runs a Web license check, and WebSocket support
  *      is a professional-edition feature. The native path skips both.
  *
- * The `p` header is a separate switch on the same theme: "web" or "wx" (case
- * insensitive) makes the server base64 its /route **response**; anything else,
- * including absent, gets raw bytes (RouteAction.java:52-59). The request body
- * is always base64 either way. WFC_ROUTE_RESPONSE_BASE64 below has to agree
- * with WFC_PLATFORM_HEADER.
- *
- * These values move together -- platform 4 with a "web" `p` header is a
- * combination no released client sends. Sources: proto2's route request,
- * ProtoConstants.Platform, and the two server files named above.
+ * Being native is also why /route sends no `p`, `appId` or `appKey` header.
+ * Those three exist for the Web path only: `p` set to "web" or "wx" (case
+ * insensitive) is what makes the server base64 its /route **response**, and
+ * anything else -- including absent, which is our case -- gets raw bytes
+ * (RouteAction.java:52-59). appId/appKey are forwarded into the license check
+ * that the native branch never reaches. The request body is base64 either way.
  *
  * A token is issued FOR a platform, and the server keeps that on the session.
  * WFC_PLATFORM must be the platform the token was minted for.
  *
  * Side effect worth knowing: the server kicks same-platform sessions of the
- * same account off each other (MemorySessionStore.java:456). As OSX, this
- * board fights a macOS desktop client rather than a browser tab.
+ * same account off each other (MemorySessionStore.java:456). As AndroidWearable
+ * this board fights another wearable client, not a phone or a desktop.
  */
 
 #ifndef WFC_PLATFORM_H
 #define WFC_PLATFORM_H
 
-/* ProtoConstants.Platform.Platform_OSX. Not Platform_WEB (5) or Platform_WX
- * (6): those two are the WebSocket branch described above. */
-#define WFC_PLATFORM        4
-#define WFC_PLATFORM_HEADER "osx"   /* route request header `p` */
-
-/* 0 unless WFC_PLATFORM_HEADER is "web" or "wx". */
-#define WFC_ROUTE_RESPONSE_BASE64 0
+/* ProtoConstants.Platform.Platform_AndroidWearable. Not Platform_WEB (5) or
+ * Platform_WX (6): those two are the WebSocket branch described above. */
+#define WFC_PLATFORM 13
 
 #define WFC_APP_NAME    "cn.wildfirechat.chat"
 #define WFC_DEVICE_NAME "esp32s3-box-3b"
 #define WFC_PHONE_NAME  "esp32s3-box-3b"
 #define WFC_APP_VERSION "0.1"
 #define WFC_SDK_VERSION "0.1"
-
-/* Sent as the appId/appKey route headers. The server only reads them on the
- * WEB/WX license path, so on the native path they are decoration -- kept
- * because they cost nothing and are needed the moment anyone flips the
- * platform back. Same constants WFC.js ships with (lib/connect/index.js:12). */
-#define WFC_APP_ID  "web_12345678"
-#define WFC_APP_KEY "6f8348670cb11cf434451bc9e7ba72eeaf3452c8"
 
 #endif /* WFC_PLATFORM_H */

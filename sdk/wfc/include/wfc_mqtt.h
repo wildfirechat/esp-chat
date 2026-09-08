@@ -47,8 +47,20 @@ extern "C" {
 
 /* ------------------------------------------------------------------ CONNACK */
 
-/* Return codes in CONNACK byte 1. 0-5 are the standard set; 6 and 7 are WFC's
- * own (proto2 stn_callback.cc:2548). */
+/* Return codes in CONNACK byte 1. 0-5 are the standard set; 6, 7 and 8 are
+ * WFC's own (MqttConnectReturnCode.java, proto2 stn_callback.cc:2548).
+ *
+ * The names are MQTT's and the meanings are the broker's, which is not the
+ * same thing (ProtocolProcessor.java:474-492). Worth knowing before mapping
+ * one onto anything:
+ *
+ *   2  not a malformed client ID -- it is what a forbidden account gets
+ *   4  every credential failure the broker has: a password that would not
+ *      decrypt, no password at all, an authenticator that said no
+ *   5  never sent by this broker
+ *   7  the session could not be loaded, or has been deleted
+ *   8  Android/APad only: the app signature is not one the deployment knows
+ */
 #define WFC_CONNACK_ACCEPTED          0
 #define WFC_CONNACK_BAD_PROTOCOL      1
 #define WFC_CONNACK_ID_REJECTED       2
@@ -57,6 +69,7 @@ extern "C" {
 #define WFC_CONNACK_NOT_AUTHORIZED    5
 #define WFC_CONNACK_UNEXPECTED_NODE   6
 #define WFC_CONNACK_NO_SESSION        7
+#define WFC_CONNACK_BAD_SIGNATURE     8
 
 #define WFC_NODE_ID_MAX   32
 #define WFC_NODE_ADDR_MAX 64

@@ -12,7 +12,7 @@
 
 idf_component_register(
     INCLUDE_DIRS "include"
-    REQUIRES esp_http_client esp_timer fatfs lwip mbedtls
+    REQUIRES esp_http_client esp_hw_support esp_timer fatfs lwip mbedtls
 )
 
 # add_prebuilt_library rather than a bare path, for the link order: it makes
@@ -20,7 +20,7 @@ idf_component_register(
 # linker sees libwfc.a before the libraries that resolve its references.
 # IDF does not put component libraries in a --start-group by default.
 add_prebuilt_library(wfc_prebuilt "lib/libwfc.a"
-    REQUIRES esp_http_client esp_timer fatfs lwip mbedtls
+    REQUIRES esp_http_client esp_hw_support esp_timer fatfs lwip mbedtls
     PRIV_REQUIRES espressif__zlib
 )
 

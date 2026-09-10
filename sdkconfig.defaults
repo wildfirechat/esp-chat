@@ -26,14 +26,23 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 # the network, then a QR code for the account.
 CONFIG_APP_SNTP_SERVER="ntp.aliyun.com"
 CONFIG_APP_TIMEZONE="CST-8"
-CONFIG_WFC_HOST="wildfirechat.net"
 CONFIG_WFC_ROUTE_PORT=80
 
 # --- display ---
-# The BSP drives the panel in RGB565; the draw buffer height is the BSP default
-# and is what mqtt_box runs with.
+# The BSP drives the panel in RGB565. The draw buffer is the single largest
+# claim on internal SRAM in the whole program: esp_lvgl_port allocates it with
+# MALLOC_CAP_DMA (buff_dma, no buff_spiram -- and it cannot be moved, because
+# SPIRAM carries no MALLOC_CAP_DMA in the S3 heap layout, so asking for both
+# returns NULL and the panel never starts). At the BSP default of 100 rows
+# that is 320 x 100 x 2 = 64,000 bytes held for the life of the program.
+#
+# 40 rows is 25,600 -- 38 KB back into the pool that decides whether a call
+# can start. The render mode is PARTIAL either way, so the only difference is
+# that a full-screen repaint flushes in six slices rather than three; the
+# panel is 320x240 over SPI and the flush was never the slow half of a
+# repaint (rebuilding the widget tree is -- see ui_convs.c).
 CONFIG_LV_COLOR_DEPTH_16=y
-CONFIG_BSP_LCD_DRAW_BUF_HEIGHT=100
+CONFIG_BSP_LCD_DRAW_BUF_HEIGHT=40
 
 # LVGL allocates from PSRAM, through main/ui_lv_mem.c. Its built-in allocator
 # is a fixed array -- CONFIG_LV_MEM_SIZE_KILOBYTES, 64 KB -- which lands in

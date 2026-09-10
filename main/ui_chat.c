@@ -18,10 +18,13 @@
  * store, by message_uid, from prime().
  *
  * Opening the conversation marks it read, which is what every client does and
- * what makes the unread badge mean something. That now also tells the server
- * -- wfc_clear_unread() reports it, so the phone stops badging the same
- * conversation and the sender gets a read receipt -- but it is still one call
- * and it still does not block, so nothing here changes.
+ * what makes the unread badge mean something. That also tells the server --
+ * wfc_clear_unread() reports it, so the phone stops badging the same
+ * conversation and the sender gets a read receipt. It is one call, and it is
+ * the one call on this page that must not be made where it reads most
+ * naturally: it writes the store, so it belongs in prime() with the sending,
+ * not in create() with the widgets. The note over prime() says what that
+ * costs and what it looked like when it was in the wrong place.
  *
  * Coming back the other way: a message we sent carries how far the other side
  * has got, read out of the store while the rows are built and drawn by
@@ -70,6 +73,9 @@ static ui_msg_row_t      *s_rows;      /* MSG_MAX of them, in PSRAM */
 static size_t             s_count;
 /* Written by the composer's callback, drained by prime(). */
 static char               s_pending[PENDING_MAX];
+/* Set by create(), drained by prime(): opening a conversation reads it, and
+ * reading it is a store WRITE -- see the note over prime(). */
+static bool               s_mark_read;
 /* Asked once per repaint rather than once per row: it reads a user setting
  * out of the store, and the answer is the same for all thirty of them. */
 static bool               s_receipts;
@@ -117,17 +123,55 @@ static bool collect(const wfc_message_t *msg, void *ud)
     return ++s_count < MSG_MAX;
 }
 
-/* The page's prime(): off both locks, so it may block. Two jobs -- ask for
- * the senders whose names did not resolve, and put out the message the
- * composer handed over. Sending is here rather than in the composer's button
- * callback for the same reason the fetching is: wfc_send_text() ends in a
- * blocking send(), and the button callback runs on the LVGL task holding the
- * display lock. */
+/* The page's prime(): off both locks, so it may block. Three jobs -- mark the
+ * conversation read, ask for the senders whose names did not resolve, and put
+ * out the message the composer handed over. Sending is here rather than in
+ * the composer's button callback for the same reason the fetching is:
+ * wfc_send_text() ends in a blocking send(), and the button callback runs on
+ * the LVGL task holding the display lock.
+ *
+ * Marking it read is here for a reason that is worth spelling out, because it
+ * looks like a single cheap call and is the most expensive thing this page
+ * does. wfc_clear_unread() writes a conversation row, which is SQLite on
+ * FATFS on wear levelling on the internal flash -- a commit, a journal, and a
+ * handful of 4 KB sector erases. Two things happen for the length of that.
+ * The store's own lock is held, which is only slow; and esp_flash_write()
+ * turns the FLASH CACHE OFF, which stops every task whose code lives in flash
+ * -- LVGL included (ui_voice.c says the same thing from the other side, where
+ * it is what forbids a PSRAM stack).
+ *
+ * That was being done from create(), on the UI task, WITH THE DISPLAY LOCK
+ * HELD. So opening a conversation stopped LVGL for the length of a flash
+ * commit. For scale: this board files one incoming message -- the same
+ * machinery, a few more rows -- in 1.9 seconds (the "stored 1 of 1 message(s)
+ * in 1915 ms" line the delivery path prints). LVGL does not poll this panel:
+ * the touch is interrupt-driven and read where the interrupt is serviced
+ * (LV_INDEV_MODE_EVENT), and a read that arrives after the finger has lifted
+ * reads no finger. A tap that begins and ends inside that window is therefore
+ * not a late tap, it is no tap at all -- which is what "点击会话没反应" was.
+ *
+ * So it is parked by create() and sent from here, exactly like the pin the
+ * conversation list parks and the text the composer parks. It still happens
+ * on the same tick the page opens, because the tick that switches pages ends
+ * in this function -- but on the far side of bsp_display_unlock(), where a
+ * stalled flash cache costs a dropped frame instead of a dropped tap. */
 static void prime(void)
 {
+    if (s_mark_read) {
+        s_mark_read = false;
+        wfc_clear_unread(&s_conv);
+    }
+
     if (s_rows != NULL) {
         for (size_t i = MSG_MAX - s_count; i < MSG_MAX; i++) {
-            if (s_rows[i].from[0] != '\0') {
+            /* A channel's messages carry the channel ID as their sender, and
+             * no profile will ever come back for one -- the title is what
+             * names a channel, and ui_convs has already asked CHP for it.
+             * A single chat is the case this must not catch: there `from` is
+             * the target too, and there it IS the profile the page wants. */
+            if (s_rows[i].from[0] != '\0' &&
+                !(s_conv.type == WFC_CONV_CHANNEL &&
+                  strcmp(s_rows[i].from, s_conv.target) == 0)) {
                 wfc_user_info_t user;
 
                 wfc_get_user_info(s_rows[i].from, false, &user);
@@ -409,8 +453,10 @@ static void create(lv_obj_t *parent)
         lv_obj_center(label);
     }
 
-    /* Opening a conversation reads it. */
-    wfc_clear_unread(&s_conv);
+    /* Opening a conversation reads it -- parked for prime(), never done here:
+     * this runs with the display lock held and clearing the unread count is a
+     * flash commit. See the note over prime(). */
+    s_mark_read = true;
 }
 
 static void refresh(uint32_t dirty)

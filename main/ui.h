@@ -33,6 +33,8 @@
 extern "C" {
 #endif
 
+/* What a logged line is about. It used to pick the colour of a row on the
+ * 日志 page; now it picks a mark and a level on the console (ui.c). */
 typedef enum {
     UI_LOG_NOTE = 0,   /* something happened */
     UI_LOG_IN,         /* a message arrived */
@@ -86,7 +88,10 @@ void ui_set_wifi(const char *ssid, int rssi);
 void ui_set_ip(const char *ip);          /* NULL clears it */
 void ui_set_account(const char *user_id);
 
-/* The log page. Long lines wrap; the oldest scroll out. */
+/* A line about what the board just did, in the language the panel is in.
+ * There is no longer a page showing these -- 我的 took the 日志 tab -- so they
+ * go to the serial console, at ESP_LOGW for UI_LOG_ERROR and ESP_LOGI for the
+ * rest. Safe from any task. */
 void ui_log(ui_log_kind_t kind, const char *text);
 void ui_logf(ui_log_kind_t kind, const char *fmt, ...)
     __attribute__((format(printf, 2, 3)));

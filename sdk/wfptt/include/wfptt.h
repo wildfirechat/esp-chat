@@ -1,10 +1,9 @@
-/* The push-to-talk SDK, in one include.
+/* 对讲 SDK，一个头文件全包含。
  *
- * wfptt is to wfc what ptt.js is to WFC.js: a separate component that speaks
- * the same protocol over the same connection and knows nothing the IM client
- * does not already expose. Including this pulls the four headers that matter
- * -- the client that owns the channel, the audio the application lends it,
- * the events a screen subscribes to, and the vocabulary all three share.
+ * wfptt 之于 wfc，相当于 ptt.js 之于 WFC.js：一个独立的组件，走同一条连接、
+ * 同一套协议，用到的东西 IM 客户端全都已经对外暴露。包含本文件会引入四个头文件
+ * —— 管理频道的客户端、由应用提供的音频、界面要订阅的事件，以及三者共用的类型
+ * 定义。
  */
 
 #ifndef WFPTT_H

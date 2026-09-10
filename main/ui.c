@@ -56,13 +56,50 @@ static const char *TAG = "ui";
  * of redraws rather than forty. */
 #define UI_TICK_MS   80
 
+/* And how often it may repaint while the client is still catching up, which
+ * is a different question with a different answer.
+ *
+ * A repaint is a re-read: the conversation list queries the store, resolves a
+ * name for every row, walks every conversation again for the unread total,
+ * and then deletes and rebuilds a hundred and fifty LVGL objects. That is
+ * affordable when something happened. During the catch-up that follows a
+ * boot it is not: every batch the server sends raises messages, conversation
+ * and profile events, so the panel spends the whole sync at UI_TICK_MS doing
+ * the most expensive thing it knows how to do -- against a store that is
+ * being written to at the same time, on the same flash. The list appears to
+ * fill in slowly for exactly the reason it should have been fast: nothing
+ * gets a quiet moment, including LVGL, whose layout pass is what the task
+ * watchdog eventually notices.
+ *
+ * So while the client says it is receiving, the bits below are held rather
+ * than served, and the repaint they were asking for happens at this much
+ * slower cadence. Held, not dropped: a sync that takes a minute still shows
+ * what has landed so far, and the moment it ends the whole screen is drawn
+ * once with everything in it (on_connection_status). */
+#define UI_SYNC_MS   1500
+
+/* How long a repaint may wait for the store before giving up on this tick.
+ * Long enough to ride out an ordinary write, short enough that a board being
+ * caught up still repaints and still reads touch -- see the note in the tick
+ * where it is used. */
+#define UI_STORE_WAIT_MS 60
+
+/* The bits whose repaint rebuilds a page: a query, a name for every row, and
+ * a hundred-odd widgets deleted and made again.
+ *
+ * The rest -- the clock, the link dot, a call, the setup pages -- are cheap
+ * and never held: they are how a board that is busy still looks alive. */
+#define UI_DIRTY_HEAVY                                                        \
+    (UI_DIRTY_CONVS | UI_DIRTY_MESSAGES | UI_DIRTY_NAMES | UI_DIRTY_FRIENDS | \
+     UI_DIRTY_REQUESTS)
+
 #define UI_TEXT_MAX  256
 
 /* Queue events. Everything here is rare -- a link state change, an IP, a
- * navigation -- which is why they are queued at all. The message log goes the
- * other way, straight into ui_log.c's ring under its own mutex, because a
- * catch-up would overrun a queue this size and drop exactly the lines worth
- * reading. */
+ * navigation -- which is why they are queued at all. What ui_log() collects
+ * does not come through here at all: it goes to the serial console from
+ * whichever task logged it, because a catch-up logs a line per message and
+ * would overrun a queue this size, dropping exactly the ones worth reading. */
 enum {
     EVT_LINK,      /* text, flag */
     EVT_WIFI,      /* text = SSID or NULL, num = dBm */
@@ -85,6 +122,11 @@ typedef struct {
 static QueueHandle_t s_queue;
 static volatile uint32_t s_dirty;
 
+/* Written on the wfc task by the connection-status event, read on the UI task
+ * by the tick. A plain flag either way round: the worst a lost update can do
+ * is one repaint too early or one tick too late. */
+static volatile bool s_syncing;
+
 static lv_obj_t *s_header_title;
 static lv_obj_t *s_header_back;
 static lv_obj_t *s_link_dot;
@@ -93,7 +135,7 @@ static lv_obj_t *s_content;
 static lv_obj_t *s_navbar;
 
 /* The home pages, in the order the bar shows them. */
-#define NAV_COUNT 4
+#define NAV_COUNT 3
 
 static lv_obj_t *s_nav_btn[NAV_COUNT];
 
@@ -109,8 +151,7 @@ static int                  s_depth;
 static const ui_page_def_t *const PAGES[UI_PAGE_COUNT] = {
     [UI_PAGE_CONVS]    = &ui_page_convs,
     [UI_PAGE_CONTACTS] = &ui_page_contacts,
-    [UI_PAGE_STATUS]   = &ui_page_status,
-    [UI_PAGE_LOG]      = &ui_page_log,
+    [UI_PAGE_ME]       = &ui_page_me,
     [UI_PAGE_CHAT]     = &ui_page_chat,
     [UI_PAGE_CONTACT]  = &ui_page_contact,
     [UI_PAGE_REQUESTS] = &ui_page_requests,
@@ -124,9 +165,9 @@ static const ui_page_def_t *const PAGES[UI_PAGE_COUNT] = {
     [UI_PAGE_LOGIN]     = &ui_page_login,
 };
 
-static const char *const NAV_NAMES[NAV_COUNT] = { "会话", "联系人", "状态", "日志" };
+static const char *const NAV_NAMES[NAV_COUNT] = { "会话", "联系人", "我的" };
 static const ui_page_id_t NAV_PAGES[NAV_COUNT] = {
-    UI_PAGE_CONVS, UI_PAGE_CONTACTS, UI_PAGE_STATUS, UI_PAGE_LOG,
+    UI_PAGE_CONVS, UI_PAGE_CONTACTS, UI_PAGE_ME,
 };
 
 /* ------------------------------------------------------------- helpers */
@@ -345,6 +386,10 @@ static void switch_to(ui_page_id_t page)
     s_def->create(s_content);
     apply_chrome();
     s_def->refresh(UI_DIRTY_ALL);
+    /* Again, because a title is read from what the page holds and the page
+     * held nothing until the line above: 会话 counts unread, and a chat page
+     * names a conversation it had not looked up yet. */
+    apply_title();
 }
 
 ui_page_id_t ui_current_page(void)
@@ -404,8 +449,8 @@ static void nav_back(void)
 /* ------------------------------------------------------------ the tick */
 
 /* The clock in the header is the one thing that has to keep moving whatever
- * page is up, so it is updated here rather than by a page. Everything else
- * the status page shows is re-read when it repaints. */
+ * page is up, so it is updated here rather than by a page. Everything else a
+ * page shows it re-reads when it repaints. */
 static void tick_clock(void)
 {
     time_t    now = time(NULL);
@@ -433,13 +478,13 @@ static void apply(const ui_evt_t *evt)
         ui_log(UI_LOG_NOTE, evt->text != NULL ? evt->text : "");
         break;
     case EVT_WIFI:
-        ui_status_set_wifi(evt->text, evt->num);
+        ui_me_set_wifi(evt->text, evt->num);
         break;
     case EVT_IP:
-        ui_status_set_ip(evt->text);
+        ui_me_set_ip(evt->text);
         break;
     case EVT_ACCOUNT:
-        ui_status_set_account(evt->text);
+        ui_me_set_account(evt->text);
         break;
     case EVT_GOTO:
         nav_goto((ui_page_id_t)evt->slot);
@@ -471,28 +516,88 @@ static void ui_task(void *arg)
 {
     (void)arg;
 
-    TickType_t last = xTaskGetTickCount();
+    TickType_t last  = xTaskGetTickCount();
+    TickType_t heavy = xTaskGetTickCount();   /* last full-rebuild repaint */
+    uint32_t   held  = 0;                     /* what the throttle kept back */
 
     while (true) {
         ui_evt_t evt   = { 0 };
         bool     got   = xQueueReceive(s_queue, &evt, pdMS_TO_TICKS(UI_TICK_MS)) == pdTRUE;
-        uint32_t dirty = s_dirty;
+        uint32_t dirty = s_dirty | held;
 
         s_dirty = 0;
+        held    = 0;
 
-        /* A second has passed, so the clock moved; the status page also has
-         * an uptime and a heap reading that nothing else pushes. */
+        /* A second has passed, so the clock moved; 我的 also counts how long
+         * the long link has held, and a call counts its own duration. */
         if (xTaskGetTickCount() - last >= pdMS_TO_TICKS(1000)) {
             last = xTaskGetTickCount();
             dirty |= UI_DIRTY_STATUS;
+        }
+
+        /* The catch-up throttle (UI_SYNC_MS). Kept rather than dropped, so the
+         * repaint that was asked for still happens, just at the slower
+         * cadence. Kept HERE rather than put back in s_dirty, because s_dirty
+         * is written from the wfc task and a read-modify-write from this one
+         * could swallow a bit that arrived in between.
+         *
+         * Before the check below on purpose: a tick with nothing left in it
+         * is a tick that also skips prime(), which is the other half of what
+         * a repaint costs. */
+        if ((dirty & UI_DIRTY_HEAVY) != 0) {
+            if (s_syncing &&
+                xTaskGetTickCount() - heavy < pdMS_TO_TICKS(UI_SYNC_MS)) {
+                held   = dirty & UI_DIRTY_HEAVY;
+                dirty &= ~UI_DIRTY_HEAVY;
+            } else {
+                heavy = xTaskGetTickCount();
+            }
         }
 
         if (!got && dirty == 0) {
             continue;
         }
 
+        /* The store first, and the display only once the store has answered.
+         *
+         * Everything below this point reads the store with the display lock
+         * held -- a page's refresh() does, and so does the page switch that
+         * an event can trigger -- and the display lock is LVGL's lock. So
+         * whatever a store read waits for, the panel waits for too: no
+         * repaint, no touch. That was fine while a store read was "take a
+         * mutex and return". It is not fine during a catch-up, where the wfc
+         * task is filing hundreds of messages and a single commit is seconds
+         * of sector erases. Waiting there is what turns a slow board into one
+         * that looks dead, and what the task watchdog notices.
+         *
+         * So the wait happens HERE, where LVGL's lock is nowhere near it, and
+         * it is a short one. Miss it and this tick does nothing at all: the
+         * bits go back into `held` and the event goes back on the front of
+         * the queue, so nothing is lost and the next tick does the work. Win
+         * it and every read below costs nothing, because the store's mutex is
+         * recursive and this task already holds it.
+         *
+         * Store before display, and never the other way round. */
+        if (!wfc_store_hold(UI_STORE_WAIT_MS)) {
+            held |= dirty;
+            if (got) {
+                /* Front, so a navigation does not fall behind an event that
+                 * arrives while this tick is standing down. `evt.text` is
+                 * still owned by the queue, so it must not be freed here. */
+                xQueueSendToFront(s_queue, &evt, 0);
+            }
+            /* An event put back is an event the next xQueueReceive() returns
+             * at once, so this path must cost something on its own -- the
+             * wait above is the only thing that makes it, and one tick here
+             * says so rather than relying on it. A loop that can go round
+             * without blocking is a task that starves its core. */
+            vTaskDelay(1);
+            continue;
+        }
+
         if (!bsp_display_lock(1000)) {
             ESP_LOGW(TAG, "display busy, dropped an update");
+            wfc_store_release();
             free(evt.text);
             continue;
         }
@@ -508,6 +613,7 @@ static void ui_task(void *arg)
             apply_title();
         }
         bsp_display_unlock();
+        wfc_store_release();
         free(evt.text);
 
         /* Outside the lock on purpose: this is where a page asks the server
@@ -515,9 +621,37 @@ static void ui_task(void *arg)
          * socket. Holding the display lock across that freezes LVGL --
          * repaints and touch both -- which reads as a dead board rather than
          * a slow one. Nothing switches pages in between, because navigation
-         * also happens on this task. */
+         * also happens on this task.
+         *
+         * But it is outside the store's hold as well, and that is the half
+         * that was missing. A prime() is mostly store reads -- the chat page
+         * looks up a profile for every row it drew -- and a store read waits
+         * for ever (wfc_store.h); the tick above is careful about that and
+         * this was not. So the UI task would walk into a read just as the wfc
+         * task began a commit and stand there for the whole of it, and the
+         * repaint the message needed waited behind a lookup for names it
+         * already had.
+         *
+         * So: ask whether the store is free, and skip this round if it is
+         * not. Nothing is lost by skipping -- prime() asks again for what a
+         * page found missing, and the next tick is 80 ms away -- and what is
+         * parked for it (a message typed into the composer, a conversation
+         * just pinned) stays parked and goes out on that next tick.
+         *
+         * The hold is given straight back rather than kept across the call,
+         * because prime() reaches the network and holding the store across a
+         * blocking send() would make the wfc task wait on the panel: exactly
+         * the deadlock-shaped trade this file spends the tick above avoiding,
+         * only pointing the other way. That makes this an advisory check, not
+         * a guarantee: lose the race and this round blocks once, and the next
+         * one sees a busy store and skips. Which is the point -- a commit is
+         * over a second, so a check that lands anywhere inside one catches
+         * it. */
         if (s_def->prime != NULL) {
-            s_def->prime();
+            if (wfc_store_hold(0)) {
+                wfc_store_release();
+                s_def->prime();
+            }
         }
     }
 }
@@ -549,6 +683,19 @@ static void post(uint8_t type, uint8_t slot, bool flag, int32_t num,
 static void on_connection_status(int status, void *ud)
 {
     (void)ud;
+
+    bool syncing = status == WFC_STATUS_RECEIVING;
+
+    /* The end of the catch-up, which is the one moment the whole screen is
+     * worth drawing from scratch: everything the throttle held back through
+     * the sync is answered here, once, with the store in its finished state.
+     * Any other status ends it too -- a link that dropped mid-sync is not
+     * still receiving, and leaving the flag set would hold the panel stale
+     * until the connection came back. */
+    if (s_syncing && !syncing) {
+        ui_dirty(UI_DIRTY_ALL);
+    }
+    s_syncing = syncing;
 
     static const struct { int status; const char *text; bool ok; } TEXTS[] = {
         { WFC_STATUS_CONNECTING,          "连接服务器",       false },
@@ -656,6 +803,14 @@ static void on_group_infos(const wfc_group_info_t *groups, size_t n, void *ud)
     ui_dirty(UI_DIRTY_NAMES);
 }
 
+static void on_channel_infos(const wfc_channel_info_t *channels, size_t n, void *ud)
+{
+    (void)channels;
+    (void)n;
+    (void)ud;
+    ui_dirty(UI_DIRTY_NAMES);
+}
+
 static void on_group_members(const char *group_id, size_t n, void *ud)
 {
     (void)ud;
@@ -746,6 +901,7 @@ static void subscribe_all(void)
     wfc_on_conversation_update(on_conversation_update, NULL);
     wfc_on_user_infos_update(on_user_infos, NULL);
     wfc_on_group_infos_update(on_group_infos, NULL);
+    wfc_on_channel_infos_update(on_channel_infos, NULL);
     wfc_on_group_members_update(on_group_members, NULL);
     wfc_on_friend_list_update(on_friends, NULL);
     wfc_on_friend_request_update(on_friend_requests, NULL);
@@ -853,17 +1009,34 @@ void ui_set_account(const char *user_id)
     post(EVT_ACCOUNT, 0, false, 0, user_id);
 }
 
+/* The panel had a 日志 page until 我的 replaced it, and these went to a ring
+ * of thirty-two lines in PSRAM as well as to the console. The page is gone and
+ * the calls are not: fifty-odd of them across the application say, in one
+ * line each and in Chinese, what a board just did -- which is more than the
+ * component tags around them do, and it is worth keeping even when the only
+ * place to read it is a serial cable.
+ *
+ * No timestamp of our own any more: esp_log stamps every line already, and it
+ * does it from the moment the board boots rather than from the moment SNTP
+ * works. The kind picks the level, so a "!!" that used to be a red row is a
+ * warning the console filters on. */
 void ui_log(ui_log_kind_t kind, const char *text)
 {
-    char      stamp[16];
-    char      line[UI_TEXT_MAX + 24];
-    time_t    now = time(NULL);
-    struct tm tm;
+    static const char *const MARK[] = {
+        [UI_LOG_NOTE]  = "",
+        [UI_LOG_IN]    = "<- ",
+        [UI_LOG_OUT]   = "-> ",
+        [UI_LOG_ERROR] = "!! ",
+    };
 
-    localtime_r(&now, &tm);
-    strftime(stamp, sizeof(stamp), "%H:%M:%S", &tm);
-    snprintf(line, sizeof(line), "%s  %.*s", stamp, UI_TEXT_MAX, text);
-    ui_log_append(kind, line);
+    if (text == NULL) {
+        return;
+    }
+    if (kind == UI_LOG_ERROR) {
+        ESP_LOGW(TAG, "%s%.*s", MARK[kind], UI_TEXT_MAX, text);
+    } else {
+        ESP_LOGI(TAG, "%s%.*s", MARK[kind], UI_TEXT_MAX, text);
+    }
 }
 
 void ui_logf(ui_log_kind_t kind, const char *fmt, ...)

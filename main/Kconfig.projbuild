@@ -143,13 +143,6 @@ menu "Chat app"
             is played across a desk, so the two want different numbers and
             the AV SDK is not always compiled in to take one from.
 
-    config WFC_HOST
-        string "IM server host"
-        default "wildfirechat.net"
-        help
-            The name the deployment knows itself by. It is sent inside the
-            route request (root-key encrypted) and later forms the MQTT
-            will-topic, so a mismatch here fails at CONNECT, not at /route.
 
     config WFC_ROUTE_PORT
         int "Route HTTP port"

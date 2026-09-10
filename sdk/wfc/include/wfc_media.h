@@ -1,61 +1,36 @@
-/* Putting a file where a message can point at it.
+/* 上传文件，让消息可以指向它。
  *
- * Everything else in this client is one round trip on the long link. An
- * upload is three steps and only the first of them is: ask the server where
- * to put it, PUT or POST the bytes at whatever HTTP service it named, then
- * hand the resulting URL to wfc_send_message() as remote_media_url. The file
- * never goes over the long link.
- *
- * ------------------------------------------------------------------------
- * There are two ways to ask, and which one applies is the server's to say.
- *
- * GMPU is asked first. It answers with a URL the server has already signed:
- * nothing is left to compute, which is why it is the path that works against
- * object stores this board will never carry code for. Its ONE refusal,
- * ERROR_CODE_NOT_IMPLEMENT, means precisely "this deployment stores media
- * itself" -- the handler's first line -- and that is the case GMUT exists
- * for, so a refusal is a redirection rather than a failure.
- *
- * GMUT is the other way: a token to build a request WITH. Only its
- * self-hosted branch is implemented here, because it is the only one that
- * does not need the client to know an encoding of its own, and it is the only
- * one GMPU does not cover.
- *
- * The route's WFC_COMMERCIAL_BIG_FILE_UPLOAD bit looks like it would save the
- * round trip and does not: it is a licence flag and GMPU's handler never
- * reads it. ASSESSMENT.md section 8.14 has what trusting it costs.
+ * 本客户端其他功能都是长连接上的一次往返，上传则是三步，而且只有第一步走长连
+ * 接：先向服务器要一个上传地址，再把数据 PUT 或 POST 到它指定的 HTTP 服务，
+ * 最后把得到的 URL 作为 remote_media_url 传给 wfc_send_message()。文件本身
+ * 不走长连接。
  *
  * ------------------------------------------------------------------------
- * Neither topic is spelled the way ASSESSMENT.md spelled it for two months.
+ * 要地址有两种方式，用哪一种由服务端决定。
  *
- * It said GUT, and there is no GUT. The handler is @Handler("GMUT")
- * (GetMediaUploadTokenHandler.java), the constant is
- * getMediaUploadTokenTopic in proto2 (business.cc:248), and WFC.js publishes
- * 'GMUT' (wfcImpl.js:4282); GMPU is beside it on business.cc:249. This is the
- * same shape of mistake as FALS in section 8.13: a name written down once
- * from memory and never contradicted, because nothing tries it until somebody
- * implements the feature.
+ * 先请求“预签名地址”。服务器直接返回一个已经签好名的 URL，客户端不需要再算
+ * 任何东西，所以它也是对接各种对象存储时唯一可行的路径。它只有一种拒绝方式，
+ * 含义精确地是“本部署自己保存媒体文件”，那正是第二种方式存在的场景 —— 所以
+ * 这种拒绝是改道，不是失败。
  *
- * ------------------------------------------------------------------------
- * THIS CALL BLOCKS. It is an MQTT round trip followed by an HTTP one, and it
- * can take seconds on a slow link.
- *
- * So it is bound by the same rule as everything else that blocks: never from
- * a wfc callback (they run on the transport task, which is the task that
- * would have to deliver the reply this call is waiting for -- calling it
- * there deadlocks until the timeout), never from a page's create(), refresh()
- * or draw(). A task of the caller's own, or a page's prime().
+ * 第二种方式是取一个“上传凭证”，由客户端自己拼请求。这里只实现了它的自建存储
+ * 分支，因为只有这一支不需要客户端为某种对象存储实现专门的签名算法，也只有这
+ * 一支是第一种方式覆盖不到的。
  *
  * ------------------------------------------------------------------------
- * The key is not ours to choose freely.
+ * 这个调用会阻塞。它是一次长连接往返加一次 HTTP 往返，链路慢时可能要好几秒。
  *
- * The server checks it (GetMediaUploadTokenHandler.java:36): the last path
- * segment must start with our user ID, or with our user ID base64'd in the
- * one dialect WFC uses -- standard base64 with "+" "/" "=" rewritten to
- * "-2B" "-2F" "-3D". A key that fails the check comes back as
- * ERROR_CODE_NOT_RIGHT and nothing says why. build_key() below is
- * proto2's getMediaPath() (business.cc:2186) transcribed, so it passes for
- * the same reason theirs does.
+ * 所以它遵守与其他阻塞调用相同的规则：不要在 wfc 的回调里调用（回调运行在传输
+ * 任务上，而这个调用等待的应答正要由那个任务投递，在那里调用会一直死锁到超时），
+ * 也不要在界面的构建或绘制流程里调用。请在调用方自己的任务里调用。
+ *
+ * ------------------------------------------------------------------------
+ * 文件 key 不能随便起。
+ *
+ * 服务器会校验：路径的最后一段必须以本账号的用户 ID 开头，或者以该用户 ID 按
+ * WFC 特有的方式 base64 之后的结果开头 —— 即标准 base64 再把 "+" "/" "=" 依次
+ * 换成 "-2B" "-2F" "-3D"。不符合的 key 会被拒绝，而且不会说明原因。key 由本
+ * 组件内部按同样的规则生成。
  */
 
 #ifndef WFC_MEDIA_H
@@ -70,8 +45,8 @@
 extern "C" {
 #endif
 
-/* messageContentMediaType.js. The server buckets uploads by this, so it
- * decides which bucket the file lands in as well as what it is called. */
+/* 媒体类型，取值与其他 WFC 客户端一致。服务器按它分桶存放，所以它既决定文件
+ * 落在哪个桶里，也影响文件名。 */
 #define WFC_MEDIA_GENERAL  0
 #define WFC_MEDIA_IMAGE    1
 #define WFC_MEDIA_VOICE    2
@@ -79,32 +54,27 @@ extern "C" {
 #define WFC_MEDIA_FILE     4
 #define WFC_MEDIA_PORTRAIT 5
 
-/* Room for the URL that comes back. Object stores hand out signed URLs with
- * a signature, an expiry and a credential in the query string, so this is
- * sized for one of those and not for "a domain and a file name".
+/* 返回的 URL 缓冲区大小。对象存储签发的地址会在查询串里带上签名、有效期和
+ * 凭证，所以这里是按那种地址来定的，而不是按“一个域名加一个文件名”。
  *
- * It is deliberately larger than CONFIG_WFC_STORE_MAX_TEXT: a URL that is
- * clipped on the way INTO the store is a message that can never be played,
- * and the store is where the clipping would happen silently. Getting the
- * whole thing here at least lets the caller find out. */
+ * 它特意比 CONFIG_WFC_STORE_MAX_TEXT 大：URL 在写入存储时被截断，等于一条永远
+ * 播不出来的消息，而截断在存储里是悄无声息的。在这里拿到完整的 URL，至少让
+ * 调用方有机会发现。 */
 #define WFC_MEDIA_URL_MAX 512
 
-/* Uploads `data` and writes where it landed into `url`.
+/* 上传 data，并把文件地址写入 url。
  *
- * `ext` is the file extension including the dot (".amr"), and it is not
- * cosmetic -- it is what every other client keys its player off. `mime` is
- * the Content-Type to declare; pass NULL for "application/octet-stream",
- * which is what both reference clients send for a .amr because neither has
- * an entry for it.
+ * ext 是带点的扩展名（".amr"），它不是可有可无的 —— 其他客户端都靠它来决定用
+ * 什么播放器。mime 是要声明的 Content-Type，传 NULL 表示
+ * "application/octet-stream"。
  *
- * Returns ESP_OK with `url` filled, or:
- *   ESP_ERR_INVALID_STATE  not connected, or called before the client is up
- *   ESP_ERR_TIMEOUT        no answer to GMPU or GMUT
- *   ESP_ERR_NOT_SUPPORTED  neither way applies: GMPU said the deployment
- *                          stores media itself and GMUT then described
- *                          storage that is not self-hosted. That is a
- *                          misconfigured server, and the log names the type
- *   ESP_FAIL               the server refused, or the HTTP upload did
+ * 成功时返回 ESP_OK 并填好 url，否则：
+ *   ESP_ERR_INVALID_STATE  未连接，或客户端尚未启动
+ *   ESP_ERR_TIMEOUT        请求上传地址没有得到应答
+ *   ESP_ERR_NOT_SUPPORTED  两种方式都不适用：服务器表示自己保存媒体文件，而
+ *                          上传凭证描述的又不是自建存储。这属于服务端配置有
+ *                          问题，日志里会给出存储类型
+ *   ESP_FAIL               服务器拒绝，或 HTTP 上传失败
  */
 esp_err_t wfc_media_upload(int32_t media_type, const char *ext, const char *mime,
                            const uint8_t *data, size_t len,

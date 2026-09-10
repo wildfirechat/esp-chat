@@ -1,13 +1,12 @@
 /* What the pages and the shell agree on.
  *
- * The panel is a handful of pages behind one header: four that are "home" and
+ * The panel is a handful of pages behind one header: three that are "home" and
  * reached from the nav bar, and the rest pushed on top of them and reached by
  * tapping something.
  *
  *   会话      the conversation list      home
  *   联系人    the friend list            home
- *   状态      what the board is doing    home
- *   日志      the message log            home
+ *   我的      this account, and the board home
  *   chat      one conversation           pushed from 会话, or from a contact
  *   对讲      push-to-talk on one channel pushed from chat
  *   写        the composer               pushed from chat, and from anything
@@ -23,8 +22,8 @@
  * builds the tree, refresh() fills it from the store, destroy() forgets the
  * pointers, title() names it in the header. Leaving a page deletes every
  * widget in it, so nothing a page holds may be read after destroy() -- which
- * is why anything that has to survive (the log's backlog, the status fields)
- * lives in a plain array beside the widgets rather than in them.
+ * is why anything that has to survive (the WiFi and the address 我的 shows)
+ * lives in a plain variable beside the widgets rather than in them.
  *
  * That is the same shape as the rest of the client: the store is the model,
  * the screen is a projection of it, and a redraw is a re-read rather than a
@@ -104,14 +103,13 @@
 #define UI_DIRTY_CONVS    (1u << 0)   /* the list, or a row in it */
 #define UI_DIRTY_MESSAGES (1u << 1)   /* messages arrived or were sent */
 #define UI_DIRTY_NAMES    (1u << 2)   /* a profile landed: anything showing a name */
-#define UI_DIRTY_STATUS   (1u << 3)
-#define UI_DIRTY_LOG      (1u << 4)
-#define UI_DIRTY_CALL     (1u << 5)   /* a call started, changed state or ended */
-#define UI_DIRTY_FRIENDS  (1u << 6)   /* the friend list moved */
-#define UI_DIRTY_MEDIA    (1u << 7)   /* a picture finished loading */
-#define UI_DIRTY_REQUESTS (1u << 8)   /* a friend request arrived or was answered */
-#define UI_DIRTY_SETUP    (1u << 9)   /* 配网 / 扫码登录 moved a step (ui_setup.h) */
-#define UI_DIRTY_PTT      (1u << 10)  /* somebody started or stopped talking */
+#define UI_DIRTY_STATUS   (1u << 3)   /* the one-second tick, and what it moves */
+#define UI_DIRTY_CALL     (1u << 4)   /* a call started, changed state or ended */
+#define UI_DIRTY_FRIENDS  (1u << 5)   /* the friend list moved */
+#define UI_DIRTY_MEDIA    (1u << 6)   /* a picture finished loading */
+#define UI_DIRTY_REQUESTS (1u << 7)   /* a friend request arrived or was answered */
+#define UI_DIRTY_SETUP    (1u << 8)   /* 配网 / 扫码登录 moved a step (ui_setup.h) */
+#define UI_DIRTY_PTT      (1u << 9)   /* somebody started or stopped talking */
 #define UI_DIRTY_ALL      0xFFFFFFFFu
 
 void ui_dirty(uint32_t bits);
@@ -121,8 +119,7 @@ void ui_dirty(uint32_t bits);
 typedef enum {
     UI_PAGE_CONVS = 0,
     UI_PAGE_CONTACTS,
-    UI_PAGE_STATUS,
-    UI_PAGE_LOG,
+    UI_PAGE_ME,
     UI_PAGE_CHAT,
     UI_PAGE_CONTACT,
     UI_PAGE_REQUESTS,
@@ -176,8 +173,7 @@ extern const ui_page_def_t ui_page_pick;
 extern const ui_page_def_t ui_page_chat;
 extern const ui_page_def_t ui_page_compose;
 extern const ui_page_def_t ui_page_record;
-extern const ui_page_def_t ui_page_status;
-extern const ui_page_def_t ui_page_log;
+extern const ui_page_def_t ui_page_me;
 extern const ui_page_def_t ui_page_call;
 extern const ui_page_def_t ui_page_ptt;
 extern const ui_page_def_t ui_page_provision;
@@ -331,11 +327,11 @@ bool ui_ptt_busy(void);
 /* ui_ptt_start(), which brings the SDK up, is in ui.h with the other things
  * app_main.c calls. */
 
-/* ui.c -> ui_status.c, ui_log.c: the facts the app pushes in. */
-void ui_status_set_wifi(const char *ssid, int rssi);
-void ui_status_set_ip(const char *ip);
-void ui_status_set_account(const char *user_id);
-void ui_log_append(ui_log_kind_t kind, const char *line);
+/* ui.c -> ui_me.c: the three facts the client cannot answer for itself, so
+ * the application pushes them in (ui.h). */
+void ui_me_set_wifi(const char *ssid, int rssi);
+void ui_me_set_ip(const char *ip);
+void ui_me_set_account(const char *user_id);
 
 /* ------------------------------------------------------------- helpers */
 

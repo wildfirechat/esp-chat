@@ -1,39 +1,32 @@
-/* The audio the application lends this module.
+/* 由应用提供给本模块使用的音频通道。
  *
- * wfptt does not open a codec. That is the one structural difference between
- * it and ../wfav-esp, which has a board file of its own, and it is not
- * laziness -- it is the only arrangement that can be correct on this board.
+ * wfptt 自己不打开编解码设备。这是它与 ../wfav-esp 唯一的结构性差异（后者自带
+ * 板级音频代码），而且这不是偷懒 —— 在这块板子上，只有这一种安排是正确的。
  *
- * There is one I2S bus and two codecs on it, and three features want them:
- * a call (wfav_audio.c), a voice message (the application's app_audio.c) and
- * push-to-talk. Whoever is second has to be told no. A latch can only do that
- * if all three go through it, and no module can hold a latch over the other
- * two -- so the latch belongs to the application, and the modules ask.
+ * 板上只有一条 I2S 总线、总线上挂着两个编解码器，而有三个功能要用它们：通话、
+ * 语音消息和对讲。谁第二个来，谁就得被拒绝。要做到这一点，三者必须都经过同一个
+ * 仲裁，而任何一个模块都不可能替另外两个持有这个仲裁 —— 所以仲裁属于应用，模块
+ * 只负责申请。
  *
- * So this is what the application hands over at wfptt_start(): a microphone
- * that produces AMR-NB and a speaker that consumes it, already arbitrated
- * against everything else that wants them. wfptt supplies the protocol, the
- * channel and the timing.
+ * 于是应用在 wfptt_start() 时交过来的就是这些：一个产出 AMR-NB 的麦克风和一个
+ * 消费 AMR-NB 的扬声器，且已经与其他要用它们的功能仲裁过。wfptt 负责协议、频道
+ * 和时序。
  *
- * The format is not negotiable in either direction: AMR-NB, 8 kHz, mono, one
- * 20 ms frame per header byte. It is what every other WildFire client
- * records and plays for push-to-talk, so a board that produced anything else
- * would be talking to nobody.
+ * 格式在两个方向上都没有商量余地：AMR-NB，8 kHz，单声道，每个头字节对应一个
+ * 20 ms 帧。所有 WildFire 客户端的对讲录制和播放用的都是它，产出别的格式的设备
+ * 等于在跟谁都说不上话。
  *
  * ------------------------------------------------------------------------
- * Which task each of these is called on, because two of them may block and
- * the rest may not.
+ * 每个函数在哪个任务上被调用 —— 其中两个可以阻塞，其余的不行。
  *
- *   record_*    the wfptt task. record_start() and record_stop() are allowed
- *               to take a moment -- stop waits for a microphone to be put
- *               down -- but nothing here is allowed to wait on the network.
- *   play_open   the wfptt player task, and it MAY BLOCK: it is opening a
- *   play_write  codec and then writing at the speed of real time, which is
- *   play_close  the whole point of it having a task of its own.
+ *   record_*    wfptt 任务。record_start() 和 record_stop() 可以花一点时间
+ *               （stop 要等麦克风放下），但这里的任何函数都不允许等待网络。
+ *   play_open   wfptt 的播放任务，它可以阻塞：它要打开编解码设备，然后按实时
+ *   play_write  速度写入 —— 这正是它单独占一个任务的意义。
+ *   play_close
  *
- * Neither task holds the display lock and neither is the long link's, so an
- * implementation may do what it likes with the hardware. It may NOT call
- * back into wfptt.
+ * 两个任务都不持有显示锁，也都不是长连接的任务，所以实现可以随意操作硬件。但它
+ * 不能回调进 wfptt。
  */
 
 #ifndef WFPTT_AUDIO_H
@@ -49,57 +42,48 @@ extern "C" {
 #endif
 
 typedef struct {
-    /* Opens the microphone and starts encoding. Returns at once; a failure to
-     * open may also surface as a recording that never produces any bytes,
-     * which this module treats the same way.
+    /* 打开麦克风并开始编码。立即返回；打开失败也可能表现为一次始终产不出字节的
+     * 录音，本模块对两者一视同仁。
      *
-     * ESP_ERR_INVALID_STATE is the expected refusal: a call or a voice
-     * message has the audio path. It reaches the caller as
-     * WFPTT_ERR_RECORDER_ERROR. */
+     * ESP_ERR_INVALID_STATE 是预期之中的拒绝：音频通道被通话或语音消息占着。
+     * 它会以 WFPTT_ERR_RECORDER_ERROR 的形式传给调用方。 */
     esp_err_t (*record_start)(void *ud);
 
-    /* The AMR frames recorded so far, WITHOUT the file header, and how many
-     * bytes of them there are. The pointer stays valid until record_stop() or
-     * record_cancel(), and the length only grows -- this module remembers how
-     * far it has sent and publishes the difference.
+    /* 到目前为止录到的 AMR 帧，不含文件头，以及它们有多少字节。指针在
+     * record_stop() 或 record_cancel() 之前一直有效，长度只增不减 —— 本模块记着
+     * 自己发到哪里了，每次只发新增的部分。
      *
-     * The header is excluded because a sound-data message carries frames and
-     * nothing else: "#!AMR\n" in the middle of a stream is six bytes the far
-     * end will try to decode as a frame. The same recording keeps its header
-     * when it comes back whole from record_stop(), because there it is a
-     * file. */
+     * 不含文件头，是因为一条音频消息里只有帧：数据流中间冒出来的 "#!AMR\n" 是
+     * 六个字节，对端会试着把它当成一帧来解码。同一段录音在 record_stop() 里整体
+     * 交还时是带头的，因为那里它是一个文件。 */
     const uint8_t *(*record_data)(void *ud, size_t *len);
 
-    /* Stops, and hands over the whole take as a playable .amr -- header and
-     * all -- for the voice message that optionally follows a talk. On ESP_OK
-     * this module owns `amr` and passes it to the on_recording callback (or
-     * frees it).
+    /* 停止录音，并把整段录音作为一个可播放的 .amr（含文件头）交出来，供发言之后
+     * 可选发送的那条语音消息使用。返回 ESP_OK 时 amr 归本模块所有，它会把它交给
+     * on_recording 回调（或者直接释放）。
      *
-     * Any other return means there is no take, which is not an error: a press
-     * too short to be a message is the usual reason (ESP_ERR_INVALID_SIZE).
-     * The talk still ends normally -- the audio was already sent, chunk by
-     * chunk, while it was happening. */
+     * 返回其他值表示没有可用的录音，这不是错误：最常见的原因是按得太短，不足以
+     * 构成一条消息（ESP_ERR_INVALID_SIZE）。发言仍然正常结束 —— 音频在发言过程
+     * 中已经一块一块发出去了。 */
     esp_err_t (*record_stop)(void *ud, uint8_t **amr, size_t *len, int *seconds);
 
-    /* Stops and throws it away. Called when a talk is abandoned rather than
-     * finished -- wfptt_stop() with the microphone open. */
+    /* 停止录音并丢弃。用于发言被放弃而不是正常结束的情况 —— 比如麦克风还开着时
+     * 调用了 wfptt_stop()。 */
     void (*record_cancel)(void *ud);
 
-    /* Opens the speaker for a stream of frames. Called when the first chunk
-     * of somebody's talk arrives, not when the module starts, so a board
-     * nobody talks to never touches the codec. */
+    /* 为一串音频帧打开扬声器。在收到某个人第一块音频时调用，而不是在模块启动时
+     * 调用，所以没人对着说话的设备永远不会碰编解码设备。 */
     esp_err_t (*play_open)(void *ud);
 
-    /* Decodes and plays one chunk, blocking for as long as the audio lasts.
-     * That blocking is the pacing: the queue in front of it is the jitter
-     * buffer, and it is allowed to fill. */
+    /* 解码并播放一块音频，阻塞到这段音频放完为止。这个阻塞就是节拍：排在它前面
+     * 的队列就是抖动缓冲，允许被填满。 */
     esp_err_t (*play_write)(void *ud, const uint8_t *amr, size_t len);
 
-    /* Closes the speaker and gives the audio path back. Called when a talker
-     * stops, and when this board takes the channel to talk itself. */
+    /* 关闭扬声器，把音频通道还回去。在说话人停下时调用，本设备自己要拿频道说话
+     * 时也会调用。 */
     void (*play_close)(void *ud);
 
-    /* Handed to every function above. */
+    /* 传给上面每个函数。 */
     void *ud;
 } wfptt_audio_t;
 

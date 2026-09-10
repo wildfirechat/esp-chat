@@ -141,7 +141,6 @@ static void sync_clock(void)
 static bool client_start(void)
 {
     wfc_client_config_t cfg = {
-        .host         = CONFIG_WFC_HOST,
         .route_port   = CONFIG_WFC_ROUTE_PORT,
         .user_id      = app_cfg_user_id(),
         .client_id    = app_cfg_client_id(),

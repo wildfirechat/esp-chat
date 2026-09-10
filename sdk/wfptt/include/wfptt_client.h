@@ -1,101 +1,82 @@
-/* Push-to-talk: hold a button, everyone in the conversation hears you.
+/* 对讲：按住按钮说话，会话里的所有人都能听见。
  *
- * This is ptt.js and android-pttclient, in C and on one board. Like them it
- * is a module ON TOP of the IM client rather than a second protocol: a talk
- * is a burst of ordinary WFC messages on the same long link, and there is
- * nothing here the IM client does not already expose.
+ * 它和其他 WFC 客户端的对讲模块一样，是搭在 IM 客户端之上的一层，而不是第二套
+ * 协议：一次发言就是同一条长连接上的一串普通 WFC 消息，用到的东西 IM 客户端
+ * 全都已经对外暴露。
  *
- *   out   wfc_send_message()   pttStart, then a pttSoundData every 400 ms,
- *                              then pttEnd
- *   out   wfc_require_lock()   who gets the microphone, where only one may
- *         wfc_release_lock()   have it
- *   in    wfc_on_receive_messages()   the same three, from everyone else
- *   both  wfc_get_user_setting()      whether this channel is muted here
+ *   发   wfc_send_message()   开始消息、每 400 ms 一条音频消息、结束消息
+ *   发   wfc_require_lock()   在只允许一个人说话的频道里，决定麦克风归谁
+ *        wfc_release_lock()
+ *   收   wfc_on_receive_messages()   来自其他人的同样三种消息
+ *   双向 wfc_get_user_setting()      本频道在这个账号下是否被静音
  *
- * That is the whole seam, and it is the reason this module can be deleted
- * from a build without the IM client noticing (see the README).
+ * 接缝就这么多，这也是为什么可以把本模块从固件里去掉而 IM 客户端毫无察觉。
  *
  * ------------------------------------------------------------------------
- * What a talk actually is on the wire.
+ * 一次发言在协议上到底是什么。
  *
- * The audio is AMR-NB at 12.2 kbps -- 32 bytes per 20 ms frame -- carried raw
- * in MessageContent.data with no file header, twenty frames to a message.
- * One message every 400 ms, which is ptt.js's cadence
- * (pttRecordSession.js's setInterval) rather than android-pttclient's 100 ms,
- * and the difference is this board's link: every message is a PUBLISH waiting
- * for a PUBACK in one of sixteen in-flight slots (wfc_mqtt.c), and ten of
- * them a second leaves no room for anything else the client has to say. The
- * cost is 400 ms of mouth-to-ear delay on top of the network, which is what
- * the reference web client already lives with.
+ * 音频是 12.2 kbps 的 AMR-NB —— 每 20 ms 一帧、32 字节 —— 裸帧放在
+ * MessageContent.data 里，没有文件头，二十帧一条消息，即每 400 ms 一条。这个
+ * 节奏取自 Web 参考客户端，而不是 Android 客户端的 100 ms，差别来自本设备的
+ * 链路：每条消息都是一次发布，要占用十六个在途槽位之一等待应答，一秒十条会挤掉
+ * 客户端其他所有要说的话。代价是在网络延迟之外再加 400 ms 的端到端延迟，而 Web
+ * 参考客户端本来就是这么用的。
  *
- * Nothing is stored: the three signalling types are transparent, so a talk
- * leaves no messages behind and adds nothing to anyone's unread badge. What
- * it optionally leaves behind is one voice message per press -- see
- * `on_recording` below.
+ * 什么都不会存下来：三种信令类型都是透传的，所以一次发言不留下任何消息，也不会
+ * 增加任何人的未读数。可选留下的是每次按住说话对应的一条语音消息 —— 见下面的
+ * on_recording。
  *
  * ------------------------------------------------------------------------
- * One speaker, and what that means for listening.
+ * 一次只播一个人，以及这对收听意味着什么。
  *
- * The reference clients play everybody at once: a session per talker, mixed
- * by the platform's audio stack. This board has one I2S bus, one codec and no
- * mixer, so it plays ONE talker and reports the rest.
+ * 参考客户端会把所有人同时播出来：每个说话人一路会话，由平台的音频栈混音。本
+ * 设备只有一条 I2S 总线、一个编解码器，没有混音器，所以它只播一个人，其余的只
+ * 报告出来。
  *
- * Which one: the first to be heard from keeps the speaker until they stop,
- * unless someone with a HIGHER priority starts -- which is exactly the
- * "priority mode" ptt.js documents as its alternative to mixing, and it is
- * the mode the hardware forces here. Everyone talking is still tracked and
- * still reported through wfptt_on_user_start_talking(), so a screen can show
- * three names and be honest that it is playing one of them.
+ * 播谁：先被听到的人一直占着扬声器直到他停下，除非有优先级更高的人开始说话 ——
+ * 这正是参考客户端在不混音时给出的“优先级模式”，在这里是硬件逼出来的模式。所有
+ * 正在说话的人仍然都被跟踪、都会通过 wfptt_on_user_start_talking() 报出来，
+ * 所以界面可以显示三个人名，同时如实表明只在播其中一个。
  *
- * Talking is half duplex for the same reason: taking the channel closes the
- * speaker, because the microphone and the speaker are the same bus and the
- * board cannot have both open at two different times. ENABLE_FULL_DUPLEX is
- * false in both reference clients too.
+ * 说话是半双工的，原因相同：拿到频道会关闭扬声器，因为麦克风和扬声器共用同一条
+ * 总线，本设备不可能同时开着两边。参考客户端也都是关闭全双工的。
  *
  * ------------------------------------------------------------------------
- * Who may talk, and the lock.
+ * 谁可以说话，以及那把锁。
  *
- * A channel that allows one speaker is arbitrated by the server: SLT, WFC's
- * distributed lock (wfc_client.h), named "WFPTT_" plus the two user IDs in
- * sorted order for a single chat and plus type+target+line for a group. The
- * sort matters -- it is what makes both ends name the SAME lock -- and it is
- * android-pttclient's formula rather than ptt.js's, which uses the
- * conversation target and therefore has each side locking a different name.
+ * 只允许一个人说话的频道由服务器仲裁：用 WFC 的分布式锁（见 wfc_client.h），
+ * 锁名是 "WFPTT_" 加上排序后的两个用户 ID（单聊），或者加上 type+target+line
+ * （群）。排序很关键 —— 它保证两端说的是同一把锁；这是 Android 参考客户端的
+ * 算法，而不是 Web 参考客户端的（后者用会话 target，会导致两边各锁各的）。
  *
- * A channel that allows several does not lock at all; it counts the talkers
- * it can see and refuses past the limit, which is what the reference clients
- * do and is approximate by nature -- two boards pressing at the same instant
- * both see a channel with room in it.
+ * 允许多人说话的频道根本不加锁；它数一数自己看得见的说话人，超过上限就拒绝 ——
+ * 参考客户端也是这么做的，而且这天然是近似的：两台设备同一瞬间按下去，都会看到
+ * 一个还有空位的频道。
  *
- * The lock expires by itself after WFPTT_LOCK_SECONDS, and this module does
- * NOT renew it while a talk runs. That is deliberate and it is the reference
- * behaviour: the expiry is the safety net for a client that crashes holding
- * the channel, and a talk that outlives it can be interrupted -- which on a
- * walkie-talkie is the right way round, since the alternative is a channel
- * nobody can take back for a minute.
+ * 锁在 WFPTT_LOCK_SECONDS 之后自行过期，而本模块在发言期间不会续期。这是有意的，
+ * 也是参考实现的行为：过期是给“持锁时崩溃的客户端”准备的安全网，而一次超过锁
+ * 有效期的发言可以被别人打断 —— 对讲机上这样才对，另一种做法是频道整整一分钟
+ * 谁都抢不回来。
  *
  * ------------------------------------------------------------------------
- * Listening is global, muting is per conversation.
+ * 收听是全局的，静音是按会话的。
  *
- * Once started, this module plays push-to-talk from ANY conversation, which
- * is ENABLE_GLOBAL_PTT in both references and is the thing that makes a board
- * on a shelf a walkie-talkie rather than a screen you have to be looking at.
+ * 一旦启动，本模块会播放任意会话里的对讲，这也正是让一台放在架子上的设备成为
+ * 对讲机、而不是一块必须盯着看的屏幕的原因。
  *
- * The off switch is per conversation and is an account setting rather than a
- * board one -- wfptt_set_silent() writes user setting scope 25, the same one
- * the phone writes -- so a channel muted on the phone is muted here.
+ * 开关是按会话的，而且属于账号而不属于设备 —— wfptt_set_silent() 写的是用户
+ * 设置 scope 25，与手机写的是同一项 —— 所以在手机上静音的频道，在这里也是静
+ * 音的。
  *
  * ------------------------------------------------------------------------
- * Threading.
+ * 线程模型。
  *
- * Everything below is safe from any task, including from an LVGL button
- * callback: the two that do anything post to the wfptt task and return.
- * wfptt_status() and wfptt_talkers() read state that is only written on that
- * task, so they are cheap enough for a repaint.
+ * 下面的接口在任意任务里都可以调用，包括 LVGL 的按钮回调：真正做事的那两个会把
+ * 请求投递给 wfptt 任务后立即返回。wfptt_status() 和 wfptt_talkers() 读的是只在
+ * 该任务上写入的状态，开销小到可以放进重画流程。
  *
- * The one that is not safe from a button is wfptt_set_silent(), which reaches
- * a blocking send() on the long link -- the same rule wfc_set_user_setting()
- * carries.
+ * 唯一不能在按钮回调里调用的是 wfptt_set_silent()，它会走到长连接上的阻塞发送
+ * —— 与 wfc_set_user_setting() 的限制相同。
  */
 
 #ifndef WFPTT_CLIENT_H
@@ -118,143 +99,124 @@
 extern "C" {
 #endif
 
-/* What one press of the button produced, handed over when the talk ends.
+/* 一次按住说话录到了什么，在发言结束时交给应用。
  *
- * This is the sendVoiceMessage half of the reference clients: the burst that
- * was streamed chunk by chunk is ALSO a complete .amr, and uploading it as an
- * ordinary voice message is what leaves a record of the conversation for
- * anyone who was not listening at the time.
+ * 这相当于参考客户端里发送语音消息的那一半：刚才一块一块流式发出去的音频，同时
+ * 也是一个完整的 .amr 文件，把它作为普通语音消息上传，就为当时没在听的人留下了
+ * 记录。
  *
- * It is a callback rather than something this module does because the upload
- * is a GMPU round trip and then an HTTP PUT of up to 96 KB, which is seconds
- * -- and the application already has a task for exactly that (a voice message
- * recorded by hand takes the same path). Doing it here would mean a second
- * uploader, and a talk that could not start again until the last one had
- * finished going up.
+ * 做成回调而不是由本模块自己完成，是因为上传是一次长连接往返再加一次最大 96 KB
+ * 的 HTTP PUT，要花好几秒 —— 而应用本来就有专门做这件事的任务（手动录制的语音
+ * 消息走的是同一条路）。放在这里做，就意味着多一个上传器，而且上一条没传完之前
+ * 没法开始下一次发言。
  *
- * OWNERSHIP OF `amr` PASSES TO THE CALLBACK, which frees it with wfc_free()
- * whether it managed to send it or not. It is up to 96 KB of PSRAM and the
- * one thing that must not happen to it is being leaked on the failure path.
+ * amr 的所有权转移给回调，无论有没有成功发出去，都由回调用 wfc_free() 释放。
+ * 它最大可达 96 KB 的 PSRAM，最不该发生的事就是在失败路径上把它漏掉。
  *
- * `conv` is the caller's and dies with the call; copy it. Runs on the wfptt
- * task, so it must not block -- park the buffer and return.
+ * conv 属于调用方并随该次调用失效，需要请复制。回调在 wfptt 任务上执行，所以
+ * 不能阻塞 —— 把缓冲区存下来然后返回。
  *
- * Leave it NULL and the recording is dropped, which is the right setting for
- * a channel that is meant to be ephemeral. */
+ * 传 NULL 表示丢弃录音，对于本就不打算留痕的频道，这才是正确的设置。 */
 typedef void (*wfptt_on_recording_t)(const wfc_conversation_t *conv,
                                      uint8_t *amr, size_t len, int seconds,
                                      void *ud);
 
 typedef struct {
-    /* The microphone and the speaker, already arbitrated against the other
-     * things that want them (wfptt_audio.h). Required. */
+    /* 麦克风和扬声器，且已经与其他要用它们的功能仲裁过（见 wfptt_audio.h）。
+     * 必填。 */
     wfptt_audio_t audio;
 
-    /* What to do with the whole take. May be NULL. */
+    /* 怎么处理整段录音。可以为 NULL。 */
     wfptt_on_recording_t on_recording;
     void                *ud;
 
-    /* This board's talking priority, 0 unless a deployment has a reason.
-     * Higher wins: a listener drops whoever it is playing for a talker with a
-     * bigger number. It rides on every pttStart and every pttSoundData, so
-     * the far end can act on it without having caught the start. */
+    /* 本设备的发言优先级，除非部署方另有要求，否则填 0。数值大的优先：收听方会
+     * 为优先级更高的说话人放弃当前正在播的人。它会随每条开始消息和每条音频消息
+     * 一起发出，所以对端即使没收到开始消息也能据此处理。 */
     int32_t priority;
 } wfptt_config_t;
 
-/* Registers the four content types and subscribes to the message stream.
+/* 注册四种消息类型并订阅消息流。
  *
- * Call it after wfc_client_init() and BEFORE wfc_client_connect(), like every
- * other content-type registration: a conversation row's digest is computed as
- * the message is filed, and a type registered late does not go back and fix
- * the rows that were filed without it (wfc_content.h). It is also the
- * ordinary reason to be listening early -- the first thing a board that was
- * just switched on is likely to get is somebody already talking.
+ * 请在 wfc_client_init() 之后、wfc_client_connect() 之前调用，与其他消息类型
+ * 注册一样：会话行的摘要是在消息入库时算出来的，注册晚了不会回头去修正已经入库
+ * 的那些行（见 wfc_content.h）。提前订阅本身也有道理 —— 一台刚开机的设备最先
+ * 遇到的，很可能就是已经有人在说话。
  *
- * Cheap in the way that matters: two small tasks and a queue, and NO codec is
- * touched until there is actually audio -- a board nobody talks to never opens
- * the speaker. Calling it twice is a no-op with a warning. */
+ * 开销很小：两个小任务和一个队列，而且在真的有音频之前不会碰任何编解码设备 ——
+ * 没人对着说话的设备永远不会打开扬声器。重复调用是空操作并打印一条警告。 */
 esp_err_t wfptt_start(const wfptt_config_t *cfg);
 
-/* Stops everything: any talk in progress is abandoned, the speaker is
- * closed, the subscription is dropped. Blocks until the tasks are gone.
- * Never from a callback. */
+/* 停止一切：进行中的发言被放弃，扬声器关闭，订阅取消。会阻塞到任务结束。
+ * 不要在回调里调用。 */
 void wfptt_stop(void);
 
 bool wfptt_running(void);
 
-/* --------------------------------------------------------------- talking */
+/* -------------------------------------------------------------------- 说话 */
 
-/* Ask for the channel. Returns as soon as the request is posted -- whether it
- * was granted arrives as wfptt_on_talk_begin() or wfptt_on_talk_failed(),
- * because on a one-speaker channel the answer is a round trip to the server.
+/* 申请频道。请求投递出去即返回 —— 到底有没有拿到，会通过
+ * wfptt_on_talk_begin() 或 wfptt_on_talk_failed() 通知，因为在只允许一个人说话
+ * 的频道上，这个答案要向服务器往返一次才知道。
  *
- * Safe from an LVGL button's LV_EVENT_PRESSED.
+ * 可以在 LVGL 按钮的 LV_EVENT_PRESSED 里调用。
  *
- * Asking again while talking or while waiting fails with
- * WFPTT_ERR_TALKING. */
+ * 正在说话或正在等待时再次申请会失败，错误码为 WFPTT_ERR_TALKING。 */
 esp_err_t wfptt_request_talk(const wfc_conversation_t *conv);
 
-/* Let it go. The pair of the call above, and the one that has to happen: a
- * button whose release is missed is a board that talks until the cap.
+/* 放开频道。它是上一个调用的另一半，而且必须调用：漏掉按钮的松开事件，设备就会
+ * 一直说到时长上限。
  *
- * Safe to call when not talking, and safe while still waiting for the lock --
- * in which case the channel is given back as soon as it arrives, and no
- * audio is ever sent. Safe from LV_EVENT_RELEASED. */
+ * 不在说话时调用是安全的，还在等锁时调用也是安全的 —— 那种情况下锁一到手就会
+ * 还回去，一个字节的音频都不会发出去。可以在 LV_EVENT_RELEASED 里调用。 */
 void wfptt_release_talk(void);
 
-/* --------------------------------------------------------------- reading */
+/* -------------------------------------------------------------------- 读取 */
 
 typedef struct {
     wfptt_state_t      state;
-    /* What this board is talking on. Meaningless when IDLE. */
+    /* 本设备正在哪个会话里说话。IDLE 时无意义。 */
     wfc_conversation_t conv;
-    /* How long the current talk has run, and the cap it is running against.
-     * Both in seconds, so a screen can draw a countdown without a second
-     * source of truth. */
+    /* 当前这次发言已经持续了多久，以及它的时长上限。都是秒，这样界面画倒计时
+     * 不需要第二个数据来源。 */
     int                talk_seconds;
     int                max_seconds;
 
-    /* Who is being PLAYED right now, "" for nobody -- one talker, for the
-     * reason at the top of this file. `speaker_conv` is which conversation
-     * they are talking in, which is not necessarily the one this board is
-     * looking at: listening is global. */
+    /* 当前正在播放的是谁，没有人时是 ""，一次只有一个人（原因见本文件开头）。
+     * speaker_conv 是他在哪个会话里说话，那未必是本设备正在显示的那个会话：
+     * 收听是全局的。 */
     char               speaker[WFC_TARGET_MAX];
     wfc_conversation_t speaker_conv;
 
-    /* How many people this module currently believes are talking, everywhere.
-     * wfptt_talkers() is the same answer for one conversation. */
+    /* 本模块当前认为有多少人正在说话，跨所有会话。wfptt_talkers() 给出的是同一
+     * 个问题在单个会话里的答案。 */
     size_t             talkers;
 
-    /* The last refusal and the last ending, kept so a screen that repaints
-     * after the event has gone by can still say what happened. 0 / -1 when
-     * nothing has. */
+    /* 最近一次拒绝和最近一次结束，保存下来是为了让事件过去之后才重画的界面仍能
+     * 说明发生了什么。什么都还没发生时是 0 / -1。 */
     int                last_error;
     int                last_end_reason;
 } wfptt_status_t;
 
 void wfptt_status(wfptt_status_t *out);
 
-/* Who is talking in one conversation, into a caller-supplied array. Returns
- * how many were written, which is at most `max` and at most
- * WFPTT_MAX_TALKERS. */
+/* 某个会话里有谁在说话，写入调用方提供的数组。返回实际写入的个数，最多 max 个，
+ * 且不超过 WFPTT_MAX_TALKERS。 */
 size_t wfptt_talkers(const wfc_conversation_t *conv,
                      char uids[][WFC_TARGET_MAX], size_t max);
 
-/* ---------------------------------------------------------------- muting */
+/* -------------------------------------------------------------------- 静音 */
 
-/* Whether this conversation's push-to-talk is silenced for this ACCOUNT --
- * user setting scope 25, keyed "<target>-<type>-<line>".
+/* 这个会话的对讲在本账号下是否被静音 —— 用户设置 scope 25，键为
+ * "<target>-<type>-<line>"。
  *
- * Note the key's shape: target first. It is not the order the two
- * conversation settings wfc-esp already writes use (type-line-target), and
- * that is not a mistake in either place -- push-to-talk's key was written
- * this way in the reference clients and both ends have to agree with the
- * phone, not with each other.
+ * 注意键的顺序：target 在最前。它与 wfc-esp 已有的两个会话设置的顺序
+ * （type-line-target）不同，而两边都不是笔误 —— 对讲的这个键在参考客户端里就是
+ * 这么写的，两端要与手机保持一致，而不是彼此保持一致。
  *
- * The read answers from the store and never fetches. The write does not wait:
- * ESP_OK means "sent", the local row appears when the server acknowledges it,
- * and a refused change simply does not happen. NOT safe from an LVGL
- * callback. */
+ * 读接口只查本地存储，不会发起请求。写接口不等待：返回 ESP_OK 表示“已发送”，
+ * 本地那一行在服务器确认后才出现，被拒绝的修改就是没有发生过。不能在 LVGL 回调
+ * 里调用。 */
 bool      wfptt_is_silent(const wfc_conversation_t *conv);
 esp_err_t wfptt_set_silent(const wfc_conversation_t *conv, bool silent);
 

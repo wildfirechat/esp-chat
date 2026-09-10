@@ -1,13 +1,11 @@
-/* Where wfc allocations come from.
+/* wfc 内部的内存分配。
  *
- * Internal SRAM is the scarce pool on the S3 -- WiFi, TLS and DMA descriptors
- * all have to live there -- while protocol buffers are large, short-lived and
- * touched by the CPU only. So everything here prefers PSRAM and falls back to
- * the internal heap, which also keeps the component usable on a board without
- * PSRAM.
+ * 内部 SRAM 在 S3 上是稀缺资源 —— WiFi、TLS 和 DMA 描述符都得住在那里 ——
+ * 而协议缓冲区又大、生命周期短、且只被 CPU 访问。所以这里的分配一律优先用
+ * PSRAM，失败再退回内部堆，这也使本组件在没有 PSRAM 的板子上照样可用。
  *
- * Anything these return is released with wfc_free(), which is plain free():
- * IDF's free() dispatches on the heap the pointer came from.
+ * 这些函数返回的内存用 wfc_free() 释放，它就是 free()：IDF 的 free() 会按指针
+ * 所属的堆来分派。
  */
 
 #ifndef WFC_MEM_H
@@ -41,10 +39,9 @@ static inline void wfc_free(void *p)
     free(p);
 }
 
-/* strdup() into the same heap, because a string copied with strdup() would
- * come from the internal pool and still be released with wfc_free(). NULL in
- * gives NULL out, so a caller that copies an optional string tests the result
- * once rather than twice. */
+/* 复制字符串到同一个堆上。用 strdup() 复制出来的内存来自内部堆，却同样会被
+ * wfc_free() 释放，所以这里提供一个对应的版本。传入 NULL 返回 NULL，这样复制
+ * 可选字符串的调用方只需判断一次结果。 */
 static inline char *wfc_strdup(const char *text)
 {
     if (text == NULL) {

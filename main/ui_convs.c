@@ -7,6 +7,13 @@
  * store holds. Everything the row needs -- the name, the last line, the
  * unread count -- is already on the conversation entry that P4 maintains.
  *
+ * What the rebuild is NOT is cheap, and the events that ask for one arrive in
+ * bursts that mostly change nothing here. So the re-read is unconditional and
+ * the rebuild is not: refresh() hashes what it read and returns without
+ * touching a widget if the answer is the one already on screen (fingerprint()
+ * below). That is a cache of exactly one thing -- what is drawn -- and it is
+ * discarded whenever the widgets are, so it cannot outlive what it describes.
+ *
  * The list also does the one thing on this board that changes something the
  * ACCOUNT holds rather than something the board holds: a long press pins or
  * mutes a conversation, which is a user setting (UG/UP) and therefore shows
@@ -26,8 +33,13 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 
 #include "ui_page.h"
@@ -45,8 +57,55 @@ typedef struct {
 } row_t;
 
 static lv_obj_t *s_list;
-static row_t     s_rows[CONVS_MAX];
+
+/* Sixteen rows of about half a kilobyte each -- eight kilobytes that used to
+ * sit in .bss, which on this chip is internal SRAM reserved whether the page
+ * is ever opened or not. Nothing here is touched by DMA and nothing reads it
+ * with the flash cache off (the rules that keep task stacks internal --
+ * wfptt_play.c says why), so it belongs in PSRAM.
+ *
+ * Allocated once and never freed: as an array it lived for the life of the
+ * program, and only where it lives has changed. Everything that reads it is
+ * already gated on s_count, which stays zero until the allocation has
+ * succeeded, so a board that somehow cannot spare eight kilobytes of PSRAM
+ * shows an empty list rather than dereferencing NULL. */
+static row_t    *s_rows;
 static size_t    s_count;
+
+/* What the rows on screen say, as one number, and whether anything is drawn
+ * for it to describe.
+ *
+ * The page is still a projection and a redraw is still a re-read -- but a
+ * re-read and a rebuild are not the same price. Reading is a query and a
+ * handful of cache lookups; rebuilding is deleting some hundred and fifty
+ * LVGL objects, creating a hundred and fifty more, and laying the tree out
+ * again, which is by far the most expensive thing this panel does. And most
+ * of what asks for a redraw does not change these sixteen rows at all: a
+ * message in the seventeenth conversation, a profile for somebody not on
+ * screen, a read receipt. So the read always happens and the rebuild happens
+ * only when the answer differs from what is already drawn. */
+static uint64_t  s_drawn;
+static bool      s_drawn_valid;
+
+/* The unread total the header shows. Read once per redraw rather than in
+ * title(), which the shell calls after every repaint of every kind: the total
+ * is a walk of every conversation the store holds -- not just the sixteen
+ * here -- and nothing that can change it leaves this page's bits clear. */
+static uint32_t  s_unread;
+
+/* What the list looked like the last time prime() asked after its names, and
+ * when it asked. Asking about a row that already HAS a name costs a cache
+ * lookup and, for a group, a query over the member table to see whether its
+ * roster moved on; that is worth doing when the rows change and is pure waste
+ * on the ticks in between, of which a catch-up has a great many. Asking about
+ * a row that has none is a different price and a different rule -- see
+ * prime(). */
+static uint64_t   s_asked;
+static bool       s_asked_valid;
+static TickType_t s_asked_at;
+
+/* How often prime() may go back for the names it is still missing. */
+#define CONVS_ASK_MS 1000
 
 /* The long-press menu, and what it asked for. The menu is a child of
  * lv_layer_top() rather than of the list, so rebuilding the rows underneath
@@ -97,6 +156,55 @@ static bool collect(const wfc_conversation_info_t *info, void *ud)
     return ++s_count < CONVS_MAX;
 }
 
+/* FNV-1a, over exactly the bytes a row puts on screen and nothing else.
+ *
+ * "Nothing else" is the part that matters. last_message_uid moves on every
+ * message and the unread breakdown moves on messages that change no pixel;
+ * hashing the whole info struct would also hash the bytes past the NUL in
+ * target and digest, which the store leaves as whatever was on the stack. So
+ * the fields are named one at a time, and adding something to draw_row()
+ * means adding it here -- the cost of which is a row that stops repainting,
+ * so it is worth saying out loud.
+ *
+ * 64 bits because the price of a collision is a row that never updates. */
+static uint64_t hash_bytes(uint64_t h, const void *data, size_t len)
+{
+    const uint8_t *p = (const uint8_t *)data;
+
+    while (len-- > 0) {
+        h = (h ^ *p++) * 1099511628211ULL;
+    }
+    return h;
+}
+
+static uint64_t hash_str(uint64_t h, const char *str)
+{
+    return hash_bytes(h, str, strlen(str) + 1);
+}
+
+static uint64_t fingerprint(void)
+{
+    uint64_t h = 14695981039346656037ULL;
+
+    for (size_t i = 0; i < s_count; i++) {
+        const row_t *row    = &s_rows[i];
+        uint32_t     unread = wfc_conversation_unread_total(&row->info);
+
+        h = hash_str(h, row->title);
+        h = hash_str(h, row->digest);
+        h = hash_str(h, row->info.conversation.target);
+        h = hash_bytes(h, &row->info.conversation.type,
+                       sizeof(row->info.conversation.type));
+        h = hash_bytes(h, &row->info.conversation.line,
+                       sizeof(row->info.conversation.line));
+        h = hash_bytes(h, &row->info.timestamp, sizeof(row->info.timestamp));
+        h = hash_bytes(h, &unread, sizeof(unread));
+        h = hash_bytes(h, &row->info.top, sizeof(row->info.top));
+        h = hash_bytes(h, &row->info.silent, sizeof(row->info.silent));
+    }
+    return h;
+}
+
 /* The page's prime(): no store lock, no display lock, so this may block. A
  * conversation whose name is still an ID in angle brackets is one whose
  * profile is not cached, and asking is what fills it in a moment from now --
@@ -121,13 +229,55 @@ static void prime(void)
         }
     }
 
+    /* Two asks with two different prices, which is why they are not the same
+     * ask.
+     *
+     * A row still reading <id> has nothing in any cache that can name it, and
+     * asking after it is a lookup that misses and a push into a queue that
+     * dedups -- microseconds, and the only thing that can ever fill the row
+     * in. It also has to be repeated, because the client drops what it cannot
+     * hold: its pending queue is PENDING_MAX deep and a catch-up overruns it
+     * as a matter of course, since a batch of forty messages queues forty
+     * senders and this list's own targets go into the same queue. An ID that
+     * was dropped is only ever asked for again because somebody asks again --
+     * "will be asked for later" is what wfc_impl.c calls it, and this is the
+     * later. So it happens on any tick, rate-limited to CONVS_ASK_MS.
+     *
+     * Asking after a row that already has a name is the expensive one: for a
+     * group it also asks whether the roster has moved on, which is a query
+     * over the member table, per row. That happens only when the rows change.
+     */
+    bool all = !s_asked_valid || s_asked != s_drawn;
+
+    if (!all && xTaskGetTickCount() - s_asked_at < pdMS_TO_TICKS(CONVS_ASK_MS)) {
+        return;
+    }
+    s_asked       = s_drawn;
+    s_asked_valid = true;
+    s_asked_at    = xTaskGetTickCount();
+
     for (size_t i = 0; i < s_count; i++) {
         const wfc_conversation_t *conv = &s_rows[i].info.conversation;
 
+        /* Angle brackets are how wfc_get_conversation_title() says it could
+         * not name this one, so they are how this page knows which rows are
+         * still worth asking about. */
+        if (!all && s_rows[i].title[0] != '<') {
+            continue;
+        }
+
+        /* Which cache can name this row is decided by its type, and a channel
+         * is neither a person nor a group: asking after it as a user is a
+         * round trip that can never answer, which is what left the row
+         * reading <channelId>. */
         if (conv->type == WFC_CONV_GROUP) {
             wfc_group_info_t group;
 
             wfc_get_group_info(conv->target, false, &group);
+        } else if (conv->type == WFC_CONV_CHANNEL) {
+            wfc_channel_info_t channel;
+
+            wfc_get_channel_info(conv->target, false, &channel);
         } else {
             wfc_user_info_t user;
 
@@ -343,6 +493,12 @@ static void draw_row(size_t index)
 
 static void create(lv_obj_t *parent)
 {
+    /* A new, empty list: whatever the last visit drew is not on screen any
+     * more, so the next refresh() must rebuild whatever it reads. */
+    s_drawn_valid = false;
+    s_asked_valid = false;
+    s_unread      = 0;
+
     s_list = lv_obj_create(parent);
     ui_style_flat(s_list);
     lv_obj_set_size(s_list, LV_PCT(100), LV_PCT(100));
@@ -359,15 +515,43 @@ static void refresh(uint32_t dirty)
         return;
     }
 
+    if (s_rows == NULL) {
+        s_rows = heap_caps_calloc(CONVS_MAX, sizeof(*s_rows),
+                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (s_rows == NULL) {
+            s_rows = calloc(CONVS_MAX, sizeof(*s_rows));
+        }
+        if (s_rows == NULL) {
+            ESP_LOGE(TAG, "no room for the conversation rows");
+            return;
+        }
+    }
+
+    s_count = 0;
+    wfc_get_conversations(CONVS_MAX, collect, NULL);
+
+    /* Every conversation, not only the sixteen above, so this cannot come out
+     * of the walk that just ran. It is the header's badge and it is read here
+     * because here is the only place it can change. */
+    s_unread = wfc_get_unread_count();
+
+    uint64_t fp = fingerprint();
+
+    /* Nothing on screen would come out different, so nothing on screen is
+     * touched -- including the long-press menu, which is now left alone by
+     * events that have nothing to do with the row it was opened on. */
+    if (s_drawn_valid && fp == s_drawn) {
+        return;
+    }
+    s_drawn       = fp;
+    s_drawn_valid = true;
+
     /* The rows are about to be deleted and rebuilt, so the indices the menu's
      * buttons were built against are gone. It holds a conversation rather
      * than an index, so it would still do the right thing -- but a menu that
      * outlives the row it was opened on reads as a bug, and closing it is the
      * confirmation that the tap landed. */
     close_menu();
-
-    s_count = 0;
-    wfc_get_conversations(CONVS_MAX, collect, NULL);
 
     lv_obj_clean(s_list);
     if (s_count == 0) {
@@ -384,9 +568,21 @@ static void refresh(uint32_t dirty)
      * resolved out of the profile cache, and an unread count that survived a
      * reboot. It is the P4 acceptance line, kept because it is still the
      * quickest way to tell from a serial console that the panel is right. */
-    ESP_LOGI(TAG, "conversations: %u, unread %u%s%s%s", (unsigned)s_count,
-             (unsigned)wfc_get_unread_count(), s_count > 0 ? " (top: " : "",
-             s_count > 0 ? s_rows[0].title : "", s_count > 0 ? ")" : "");
+    /* "unnamed" is the one that says whether the profile cache is converging:
+     * it should fall to zero within a round trip or two of a connect, and a
+     * number that sits still is a name the server is not answering for. The
+     * client drops queued IDs silently (ESP_LOGD, which this build compiles
+     * out), so without this there is nothing to see but the rows. */
+    size_t unnamed = 0;
+
+    for (size_t i = 0; i < s_count; i++) {
+        unnamed += s_rows[i].title[0] == '<';
+    }
+
+    ESP_LOGI(TAG, "conversations: %u, unread %u, unnamed %u%s%s%s",
+             (unsigned)s_count, (unsigned)s_unread, (unsigned)unnamed,
+             s_count > 0 ? " (top: " : "", s_count > 0 ? s_rows[0].title : "",
+             s_count > 0 ? ")" : "");
 }
 
 static void destroy(void)
@@ -394,16 +590,19 @@ static void destroy(void)
     /* Not a child of this page's tree, so leaving the page does not take it
      * with it. Nothing else deletes it. */
     close_menu();
-    s_list  = NULL;
-    s_count = 0;
+    s_list        = NULL;
+    s_count       = 0;
+    s_drawn_valid = false;
+    s_asked_valid = false;
 }
 
+/* The total refresh() read, not one this asks for: the shell calls this after
+ * every repaint, and a walk of the whole conversation table is not something
+ * to do for a clock tick. */
 static void title(char *buf, size_t buf_size)
 {
-    uint32_t unread = wfc_get_unread_count();
-
-    if (unread > 0) {
-        snprintf(buf, buf_size, "会话 · %u", (unsigned)unread);
+    if (s_unread > 0) {
+        snprintf(buf, buf_size, "会话 · %u", (unsigned)s_unread);
     } else {
         snprintf(buf, buf_size, "会话");
     }

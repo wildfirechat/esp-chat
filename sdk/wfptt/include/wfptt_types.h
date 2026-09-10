@@ -1,16 +1,11 @@
-/* The vocabulary: what the four content types are numbered, what can go
- * wrong asking to talk, and why a talk ended.
+/* 基本类型：四种消息类型的编号、请求发言可能遇到的错误，以及一次发言的结束
+ * 原因。
  *
- * Every number here comes from a reference client and none of them may be
- * renumbered -- they are on the wire between this board and a phone. The
- * content types are pttStart / pttSoundData / pttEnd / pttSound as
- * ptt.js/ptt/internal/ registers them and as android-pttclient's @ContentTag
- * declares them; the error codes are pttErrorCode.js; the end reasons are
- * pttEndReason.js.
+ * 这里的每个数字都来自各家参考客户端，都不能重新编号 —— 它们会在本设备和手机
+ * 之间的协议里传递。
  *
- * There are no Chinese strings in this component, for the reason wfc-esp
- * gives about its own type table: the words a person reads belong to the
- * application. The *_str() functions below are ASCII labels for logs.
+ * 本组件不含任何中文文案，理由与 wfc-esp 的消息类型表相同：给人看的文字属于
+ * 应用。下面的 *_str() 函数返回的是给日志看的 ASCII 标签。
  */
 
 #ifndef WFPTT_TYPES_H
@@ -24,89 +19,79 @@
 extern "C" {
 #endif
 
-/* ------------------------------------------------------- content types */
+/* ---------------------------------------------------------------- 消息类型 */
 
-/* The audio itself: raw AMR-NB frames in MessageContent.data, no file
- * header, one message every WFPTT_CHUNK_MS. Transparent -- it is stored
- * nowhere and counts towards nobody's unread badge, which is what makes it
- * possible to send two or three of them a second. */
+/* 音频本身：MessageContent.data 里的裸 AMR-NB 帧，没有文件头，每
+ * WFPTT_CHUNK_MS 一条消息。它是透传的 —— 哪里都不存、不计入任何人的未读数，
+ * 正因如此才可能一秒发两三条。 */
 #define WFPTT_CONTENT_SOUND_DATA 21
 
-/* "I have stopped talking." Transparent, carries nothing. */
+/* “我说完了”。透传，不带任何内容。 */
 #define WFPTT_CONTENT_END        22
 
-/* The optional keepsake: the whole of one press-and-hold, uploaded as an
- * ordinary voice message so the conversation has a record of it. This is the
- * ONLY one of the four that is stored, and it is a SoundMessageContent in
- * everything but its type number -- remoteMediaUrl, mediaType 2,
- * {"duration":N} -- so a client that has never heard of push-to-talk still
- * plays it. */
+/* 可选的留底：把整次按住说话的录音，作为一条普通语音消息上传，好让会话里留下
+ * 记录。四种类型里只有它会被存储，而且除了类型号之外它就是一条语音消息 ——
+ * remoteMediaUrl、mediaType 2、{"duration":N} —— 所以从没听说过对讲功能的客户端
+ * 照样能播放它。 */
 #define WFPTT_CONTENT_SOUND      23
 
-/* "I am about to talk", carrying the speaker's priority. Transparent.
+/* “我要开始说话了”，带上说话人的优先级。透传。
  *
- * It is not required to hear someone: a listener that missed it starts
- * playing on the first sound-data message instead (the reference clients do
- * the same and say so). What it buys is the half second before the first
- * chunk arrives, in which a screen can already say who is talking. */
+ * 它不是听到别人说话的必要条件：没收到它的一方会在第一条音频消息到达时开始播放
+ * （参考客户端也是这么做的）。它买到的是第一块音频到达之前的那半秒 —— 界面可以
+ * 提前显示出是谁在说话。 */
 #define WFPTT_CONTENT_START      24
 
-/* ---------------------------------------------------------------- state */
+/* -------------------------------------------------------------------- 状态 */
 
 typedef enum {
     WFPTT_IDLE = 0,
-    /* Asked for the channel and waiting for the server to say who got it.
-     * Only reachable where the channel allows one speaker, because that is
-     * the only case with a lock to wait for. */
+    /* 已申请频道，正在等服务器裁定谁拿到它。只有在只允许一个人说话的频道里才会
+     * 出现，因为只有那种情况才有锁要等。 */
     WFPTT_REQUESTING,
     WFPTT_TALKING,
 } wfptt_state_t;
 
-/* --------------------------------------------------------------- errors */
+/* -------------------------------------------------------------------- 错误 */
 
-/* Why a request to talk was refused. pttErrorCode.js, and negative for the
- * reason it is there: a positive number in the same field is a server reply
- * code, so the two can be carried together and still be told apart. */
+/* 发言请求被拒绝的原因。取负值是有理由的：同一个字段里的正数是服务器的应答码，
+ * 这样两者可以放在一起传而不会混淆。 */
 #define WFPTT_ERR_UNKNOWN           (-1)
-/* Somebody else holds the channel. This is the lock answering, and in a
- * two-person channel it is the ordinary "the other end is talking". */
+/* 频道在别人手上。这是锁给出的答复，在两人频道里就是普通的“对方正在说话”。 */
 #define WFPTT_ERR_OCCUPIED          (-2)
-/* As many people are already talking as this channel allows. */
+/* 正在说话的人数已经达到该频道允许的上限。 */
 #define WFPTT_ERR_MAX_SPEAKER       (-3)
 #define WFPTT_ERR_GROUP_MUTED       (-4)
 #define WFPTT_ERR_GROUP_MEMBER_MUTED (-5)
-/* This board is already talking. */
+/* 本机已经在说话了。 */
 #define WFPTT_ERR_TALKING           (-6)
 #define WFPTT_ERR_NOT_IN_GROUP      (-7)
 #define WFPTT_ERR_PTT_DISABLED      (-8)
-/* The microphone would not open, or something else has the audio path -- a
- * call, or a voice message being recorded or played. */
+/* 麦克风打不开，或者音频通道被别的功能占着 —— 一通电话，或者正在录制、播放的
+ * 语音消息。 */
 #define WFPTT_ERR_RECORDER_ERROR    (-9)
-/* The long link is down. Not in the reference clients, which are always
- * online by the time anything calls them; here a board on a shelf may not be,
- * and "the request never went out" is a different thing from "somebody else
- * has the channel". */
+/* 长连接断开。参考客户端里没有这一项，因为轮到它们工作时总是在线的；而放在架子
+ * 上的设备可能不在线，“请求根本没发出去”和“频道在别人手上”是两回事。 */
 #define WFPTT_ERR_DISCONNECTED      (-10)
 
-/* ---------------------------------------------------------- end reasons */
+/* ---------------------------------------------------------------- 结束原因 */
 
-/* pttEndReason.js. Which of these a talk ends with is the whole of what a
- * screen has to say afterwards. */
+/* 一次发言以哪种方式结束，界面事后要说的话全在这里。 */
 typedef enum {
-    WFPTT_END_USER_RELEASE = 0,  /* the button came up */
-    WFPTT_END_TIMEOUT      = 1,  /* the cap on one press */
+    WFPTT_END_USER_RELEASE = 0,  /* 松开了按钮 */
+    WFPTT_END_TIMEOUT      = 1,  /* 达到单次发言时长上限 */
     WFPTT_END_TAKE_OVER    = 2,
     WFPTT_END_NETWORK      = 3,
     WFPTT_END_CHANNEL_MUTED = 4,
     WFPTT_END_MEMBER_MUTED = 5,
-    WFPTT_END_MEDIA        = 6,  /* the microphone stopped */
+    WFPTT_END_MEDIA        = 6,  /* 麦克风停止工作 */
     WFPTT_END_NOT_IN_CHANNEL = 7,
     WFPTT_END_USER_DISABLED = 8,
 } wfptt_end_reason_t;
 
-/* ---------------------------------------------------------------- names */
+/* -------------------------------------------------------------------- 名字 */
 
-/* For logs. Never NULL. */
+/* 给日志用。不会为 NULL。 */
 const char *wfptt_state_str(wfptt_state_t state);
 const char *wfptt_error_str(int error_code);
 const char *wfptt_end_reason_str(wfptt_end_reason_t reason);

@@ -442,7 +442,8 @@ void ui_call_start(void)
      * build against a packaged libwfav.a cannot change those: they were
      * compiled in when the archive was made. TURN is deployment configuration
      * rather than SDK configuration -- which deployment this board belongs to
-     * is the same question CONFIG_WFC_HOST answers -- so the application gets
+     * is the same question the baked IM-server licence answers -- so the
+     * application gets
      * the last word here. Empty (the default) leaves the SDK's own setting
      * alone, which is what a board on the public deployment wants. */
     if (strlen(CONFIG_APP_TURN_URL) > 0) {

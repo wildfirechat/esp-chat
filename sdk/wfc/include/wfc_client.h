@@ -1,60 +1,42 @@
-/* The client: one header for anything above the protocol.
+/* IM 客户端：应用需要的接口都在这一个头文件里。
  *
- * This is WFC.js's wfc.js, and the deal is the same one every WFC client
- * offers. Reads are answered from the local store and return immediately;
- * writes and refreshes go out on the long link and come back later as events
- * (wfc_event.h). Nothing here blocks on the network except
- * wfc_client_connect(), which says so.
+ * 整套 API 是读写分离的：读接口（会话、消息、资料、好友、设置……）直接查
+ * 本地存储并立即返回；写接口和刷新请求通过长连接发出，结果稍后以事件的形式
+ * 通知（wfc_event.h）。除 wfc_client_connect() 外，这里没有任何接口会等待
+ * 网络。
  *
- * That split is what makes a UI writable. Drawing a conversation row asks for
- * a display name and gets one -- the ID in angle brackets if that is all the
- * board knows yet -- and the profile arriving a moment later comes back as an
- * event that redraws the row. No screen ever waits for the server.
+ * 因此界面永远不必等服务器。画一行会话时取显示名总能立即取到 —— 资料还没
+ * 拉到时是尖括号包起来的 ID —— 稍后资料到达会触发事件，届时重画那一行即可。
  *
  * ------------------------------------------------------------------------
- * What this client syncs, and what it does not.
+ * 客户端会自动同步的内容：
  *
- *   messages      MS / MP / MN, since P2
- *   conversations a projection of the stored messages, with unread counts
- *   profiles      UPUI users, GPGI groups, GPGM group members, on demand
- *   friends       FP, from the CONNACK's friend_head and the FN push
- *   friend rqs    FRP, from the CONNACK's friend_rq_head and the FRN push
- *   settings      UG / UP, and with them conversation pinning and muting
- *   receipts      RCP / RDP inbound, and the conversation-sync setting
- *                 outbound; only where the deployment has the feature bit
+ *   消息        含超级群自己的消息线（服务端未部署超级群时不会产生请求）
+ *   会话列表    由已存储的消息投影而来，包含未读数
+ *   资料        用户、群组、群成员、频道，按需拉取
+ *   好友        好友列表与好友请求
+ *   用户设置    含会话置顶、免打扰
+ *   回执        已读、送达，仅在服务端开启该功能时同步
  *
- * And what it can change, as opposed to read: the account's settings (UP),
- * how far it has read (the same, scope 7), friendship (FAR / FHR / FDL /
- * FALS) and group membership (GC / GAM / GKM / GQ).
- *
- * Not yet, and each for a stated reason: the super-group conversation sync
- * (GCP / GMP, a second head per group that ordinary groups do not use),
- * dismissing a group and renaming one (GD / GMI -- one account owns a group
- * and this board is unlikely to be it), managers and mutes (GSM / GMM), and
- * the black list. ASSESSMENT.md section 7 has the full list.
+ * 可以修改的服务端数据：用户设置（含本账号的已读位置）、好友关系、群成员。
+ * 解散群、改群名、设置管理员与禁言、黑名单暂未提供。
  *
  * ------------------------------------------------------------------------
- * Reconnection is here, and it is the client's own business.
+ * 断线重连由客户端自己完成。
  *
- * A dropped link is retried with a backoff -- 2 s, doubling, capped at a
- * minute, jittered -- until it comes back or until the application says
- * stop. The application sees it happen and nothing more: the status goes
- * UNCONNECTED, then CONNECTING on each attempt, then CONNECTED, and the
- * catch-up that follows is the ordinary one, a delta from the stored head.
+ * 连接断开后按 2 秒起、逐次加倍、最长 1 分钟的退避（带抖动）重试，直到重新
+ * 连上或应用调用 wfc_client_disconnect()。应用只会看到状态变化：
+ * UNCONNECTED、每次重试时的 CONNECTING、然后 CONNECTED，随后是一次普通的
+ * 增量同步。
  *
- * Five answers are not retried, because repeating the request cannot change
- * them: a token the server will not accept, a token that is not this client
- * ID's, an account it has blocked, a deployment whose licence will not have
- * us, and ROFL -- another client took the session, and dialling again would
- * take it back off them. Those stop the retry loop and stay on the status, so
- * a screen can say which one happened; calling wfc_client_connect() again is
- * then an explicit decision, which is the point.
+ * 有五种拒绝不会重试，因为重发同样的请求不会得到别的结果：token 无效、
+ * token 与本 client_id 不匹配、账号被封禁、服务端 license 不接受本客户端，
+ * 以及被其他端顶下线（重连会把会话再抢回来）。这些状态会停留在连接状态上，
+ * 界面可以据此说明原因；要再次连接需应用显式调用 wfc_client_connect()。
  *
- * WFC_STATUS_TIME_INCONSISTENT is the one refusal that IS retried, and it is
- * a deliberate departure from the phone clients. A board's clock is wrong for
- * one reason -- SNTP has not landed yet -- and it fixes itself a few seconds
- * later, so a client that gave up on the first attempt would need a power
- * cycle to recover from a race it was always going to win.
+ * WFC_STATUS_TIME_INCONSISTENT 是唯一会重试的拒绝：设备时钟不对只有一个
+ * 原因 —— SNTP 还没同步完 —— 几秒后自己就好了，第一次失败就放弃反而要重启
+ * 才能恢复。
  */
 
 #ifndef WFC_CLIENT_H
@@ -75,566 +57,469 @@
 extern "C" {
 #endif
 
-/* ---------------------------------------------------------------- status */
+/* ---------------------------------------------------------------- 连接状态 */
 
-/* connectionStatus.js, value for value -- an application that already knows
- * WFC's numbers can compare against them, and a status this client does not
- * produce is a hole in the list rather than a number that means something
- * else here. Negative is a failure.
- *
- * Most of them come from /route's status byte rather than from the long
- * link (wfc_route.h), which is the same place WFC.js gets them
- * (wfcImpl.js:843-856) and proto2 does (business.cc:585-597). */
+/* 取值与其他 WFC 客户端（connectionStatus）逐个对应，本客户端不会产生的状态
+ * 在这里留空号而不是改作他用。负值表示失败。 */
 typedef enum {
-    WFC_STATUS_TIME_INCONSISTENT   = -9, /* our clock is too far from the server's */
-    WFC_STATUS_NOT_LICENSED        = -8, /* the licence will not have this client */
-    WFC_STATUS_KICKED_OFF          = -7, /* another client took the session */
-    /* The token is not this client ID's -- the first thing to check when a
-     * board that worked yesterday stops connecting, since the app server
-     * issues the two together and a token pasted next to somebody else's
-     * client ID looks exactly like this. */
+    WFC_STATUS_TIME_INCONSISTENT   = -9, /* 本机时钟与服务器相差太多 */
+    WFC_STATUS_NOT_LICENSED        = -8, /* 服务端 license 不接受本客户端，
+                                          * 或本固件内置的 license 已过期 */
+    WFC_STATUS_KICKED_OFF          = -7, /* 被其他端顶下线 */
+    /* token 不是这个 client_id 的。昨天还能连、今天连不上时先查这一项：
+     * token 和 client_id 由应用服务器成对下发，把 token 和别人的 client_id
+     * 配在一起就是这个现象。 */
     WFC_STATUS_SECRET_KEY_MISMATCH = -6,
     WFC_STATUS_TOKEN_INCORRECT     = -5,
-    WFC_STATUS_SERVER_DOWN         = -4, /* /route or the long link would not come up */
-    WFC_STATUS_REJECTED            = -3, /* the account is blocked, or CONNECT refused */
-    WFC_STATUS_LOGOUT              = -2, /* disconnect(); nothing is retrying */
+    WFC_STATUS_SERVER_DOWN         = -4, /* 路由或长连接连不上 */
+    WFC_STATUS_REJECTED            = -3, /* 账号被封禁，或服务端拒绝登录 */
+    WFC_STATUS_LOGOUT              = -2, /* 已调用 disconnect()，不再重连 */
     WFC_STATUS_UNCONNECTED         = -1,
     WFC_STATUS_CONNECTING          = 0,
-    WFC_STATUS_CONNECTED           = 1,  /* working; everything is available */
-    /* Connected and catching up. Messages are arriving in batches and the
-     * conversation list is still moving, so a UI can say so rather than
-     * flickering through a hundred redraws. */
+    WFC_STATUS_CONNECTED           = 1,  /* 已连接，所有功能可用 */
+    /* 已连接，正在追赶历史消息：消息成批到达、会话列表还在变，界面可以据此
+     * 提示“同步中”，而不是连续重画几百次。 */
     WFC_STATUS_RECEIVING           = 2,
 } wfc_connection_status_t;
 
 const char *wfc_status_str(wfc_connection_status_t status);
 
-/* ---------------------------------------------------------------- setup */
+/* ------------------------------------------------------------------ 初始化 */
 
 typedef struct {
-    /* The name the deployment knows itself by: it goes into the route request
-     * and later into the MQTT will topic, so it is not the per-node long-link
-     * host that /route hands back. */
-    const char *host;
-    uint16_t    route_port;      /* 0 -> 80 */
+    uint16_t    route_port;      /* 0 表示 80 */
 
     const char *user_id;
-    const char *client_id;       /* the token is bound to this */
-    const char *token;           /* the app server's base64 blob */
+    const char *client_id;       /* token 与它绑定 */
+    const char *token;           /* 应用服务器下发的 base64 串 */
 
-    /* Only consulted when the store has no message head yet -- a first boot,
-     * a store wiped because the account changed, or any boot at all with
-     * CONFIG_WFC_STORE_RAM. false starts from the CONNACK head, so only
-     * messages sent from now on arrive; true starts from 0 and pulls whatever
-     * roaming history the server kept.
+    /* 仅在本地存储还没有消息位置时起作用 —— 首次启动、因换账号而清空过存储，
+     * 或使用 CONFIG_WFC_STORE_RAM 的每一次启动。false 表示从登录时服务器给的
+     * 位置开始，只收此后的新消息；true 表示从 0 开始，把服务器保留的漫游历史
+     * 拉下来。
      *
-     * true is what an application with a conversation list wants. There is no
-     * conversation list on the wire to fetch -- the list is a projection of
-     * the message table, maintained as each message is stored -- so a login
-     * that pulls nothing has no conversations either, and the list fills only
-     * when somebody sends something. */
+     * 需要展示会话列表的应用应该用 true：会话列表不是服务端的一份数据，而是
+     * 本地消息表的投影，所以一条历史都不拉就没有任何会话，只能等别人发消息
+     * 才会出现。 */
     bool pull_history;
 
-    /* Consecutive MP round trips before the catch-up gives up and waits for
-     * the next MN. 0 -> 32. */
+    /* 一次追赶最多连续拉取多少轮，超过后就停下等下一次消息通知。0 表示 32。 */
     int max_pull_rounds;
 } wfc_client_config_t;
 
-/* Copies the config and opens the local store. Call once, before the network
- * is up -- the panel then comes up with the previous run's conversations on
- * it rather than filling in after the link does.
+/* 复制配置并打开本地存储。只调用一次，在联网之前调用 —— 这样界面一起来就
+ * 带着上次运行的会话列表，而不是等连上以后才填。
  *
- * A store that will not open is a hard error and is passed straight back. It
- * is not recoverable by carrying on: the sync head would stop persisting and
- * deduplication, which is "ask the store", would stop working, so every
- * pushed message would appear twice. */
+ * 存储打不开会直接把错误返回给调用方，这种情况不能靠继续运行来兜底：同步
+ * 位置将无法持久化，而消息去重就是“问存储”，去重失效会让每条推送的消息都
+ * 出现两次。 */
 esp_err_t wfc_client_init(const wfc_client_config_t *cfg);
 
-/* Route, connect, authenticate, then start the catch-up -- and from here on,
- * keep the link up.
+/* 取路由、连接、鉴权，然后开始追赶消息；此后一直负责把连接维持住。
  *
- * The one blocking call here: it returns once the CONNACK has arrived (or
- * failed), which takes a few seconds on a cold start. Everything after that
- * happens on the client's own tasks and reaches the caller as events, so this
- * is called once from a startup path and never from a callback.
+ * 这是本头文件里唯一阻塞的接口：它要等到登录应答回来（或失败）才返回，冷启动
+ * 时通常要几秒。之后的一切都在客户端自己的任务上进行，以事件的形式送达，所以
+ * 它只应该在启动流程里调用一次，绝不能在回调里调用。
  *
- * The return value is the first attempt's, and a failed first attempt is not
- * the end of it: unless the answer was one of the three that will not change
- * (see the note at the top), the retry loop is running by the time this
- * returns, and a caller that treats the error as fatal is throwing away a
- * board that would have come up on its own a few seconds later. Watch the
- * connection status instead.
+ * 返回值只是第一次尝试的结果，失败并不代表结束：只要不是上面说的那几种不会
+ * 重试的拒绝，函数返回时重连循环已经在跑了 —— 把这个错误当致命错误处理，等于
+ * 丢掉一台几秒后就能自己连上的设备。应该改为观察连接状态。
  *
- * The clock must already be right. Every encrypted payload carries an "hours
- * since 2018-01-01" prefix that the server checks, so connecting before SNTP
- * has landed does not degrade -- it fails (ASSESSMENT.md risk R4). */
+ * 调用前系统时钟必须已经正确。每个加密报文都带一个“自 2018-01-01 起的小时数”
+ * 前缀，服务器会校验它，所以 SNTP 未完成时连接不是变慢，而是直接失败。 */
 esp_err_t wfc_client_connect(void);
 
-/* Stops reconnecting, sends DISCONNECT and tears the link down. Never call
- * from an event callback: it waits for the tasks those callbacks run on. */
+/* 停止重连，发送断开报文并拆掉连接。不要在事件回调里调用：它要等待回调所在的
+ * 任务退出。 */
 void wfc_client_disconnect(void);
 
 wfc_connection_status_t wfc_client_status(void);
 
-/* The account this client is logged in as; "" before wfc_client_init(). */
+/* 当前登录的账号；wfc_client_init() 之前返回 ""。 */
 const char *wfc_client_user_id(void);
 
-/* -------------------------------------------------------------- messages */
+/* -------------------------------------------------------------------- 消息 */
 
-/* Sends a text message: wfc_send_message() with the text type and the flag
- * that makes it count towards the recipient's badge.
+/* 发一条文本消息：即以文本类型、并带上会计入对方未读数的标志调用
+ * wfc_send_message()。
  *
- * Returns once the PUBLISH is on the wire; the server's answer arrives as a
- * send-result event, and the message is only stored once that answer names it
- * -- until then it has no UID to deduplicate against.
+ * 报文发出即返回；服务器的应答以发送结果事件送达，消息也只有在应答给出消息 ID
+ * 之后才会入库 —— 在此之前它没有可用于去重的 ID。
  *
- * Safe from any task, including the UI's. */
+ * 任意任务均可调用，包括 UI 任务。 */
 esp_err_t wfc_send_text(const wfc_conversation_t *conv, const char *text);
 
-/* ------------------------------------------------- composed messages */
+/* -------------------------------------------------------------- 自定义消息 */
 
-/* A message this client composes rather than types: a custom type an
- * application defined, a call invite, an accept, a bye. Same fields as
- * wfc_message_content_t plus the two only an outgoing message has, and it
- * OWNS nothing -- every pointer is the caller's and is only read for the
- * duration of the send call.
+/* 由程序拼出来而不是用户敲出来的消息：应用自定义的类型、通话邀请、接听、挂断
+ * 等。字段是 wfc_message_content_t 加上两个只有发送方才有的字段。它不持有任何
+ * 内存：所有指针都属于调用方，且只在发送调用期间被读取。
  *
- * NULL is "" everywhere. `type` and `persist_flag` are the two that matter:
- * the server honours the flag the sender puts on, so a message that says
- * WFC_PERSIST_PERSIST_COUNT lands in the recipient's unread badge, and a call
- * invite that says WFC_PERSIST_TRANSPARENT is not stored anywhere and leaves
- * no call record. WFC_PERSIST_FROM_TYPE (wfc_content.h) takes the flag from
- * the type's registration, which is what an application that registered its
- * types should use -- one table, not a flag repeated at every send site. */
+ * 所有字符串传 NULL 等同于 ""。要点是 type 和 persist_flag：服务器按发送方给
+ * 的标志处理，所以标记为 WFC_PERSIST_PERSIST_COUNT 的消息会计入对方未读数，
+ * 而标记为 WFC_PERSIST_TRANSPARENT 的通话邀请两端都不存储、不留通话记录。
+ * WFC_PERSIST_FROM_TYPE（wfc_content.h）表示取该类型注册时声明的标志，注册过
+ * 自定义类型的应用应该用它 —— 标志写在类型表里一处，而不是在每个发送点重复。 */
 typedef struct {
     int32_t        type;
     int32_t        persist_flag;
     const char    *searchable_content;
     const char    *push_content;
-    /* MessageContent.push_data: what an offline push carries, which is not
-     * the same thing as push_content. A call invite puts the call ID and the
-     * participants here so a phone that is asleep can ring. */
+    /* 离线推送要携带的数据，与 push_content 不是一回事。例如通话邀请把通话 ID
+     * 和参与者放在这里，好让休眠中的手机能响铃。 */
     const char    *push_data;
     const char    *content;
     const char    *extra;
     const uint8_t *data;
     size_t         data_len;
 
-    /* The media fields, for a custom type that points at something uploaded
-     * rather than carrying it: mediaType is messageContentMediaType.js's
-     * number and remote_media_url is where the file landed. Both are simply
-     * relayed -- this client uploads nothing. */
+    /* 媒体字段，供内容本身不在消息里、而是指向已上传文件的自定义类型使用：
+     * media_type 是 WFC 的媒体类型编号，remote_media_url 是文件地址。两者只是
+     * 原样转发，本客户端不负责上传。 */
     int32_t        media_type;
     const char    *remote_media_url;
 
-    /* An @ mention. 1 is everyone, 2 is the users in `mentioned_targets`, and
-     * it is not cosmetic: the receiving client counts a mention into
-     * wfc_conversation_info_t.unread_mention rather than plain unread, which
-     * is what an "@ me" marker reads. */
+    /* @ 提醒。1 表示 @所有人，2 表示 @mentioned_targets 里的人。它不只是显示
+     * 效果：接收端会把被 @ 的消息计入 wfc_conversation_info_t.unread_mention
+     * 而不是普通未读数，“有人@我”的标记就是据此画出来的。 */
     int32_t        mentioned_type;
     const char *const *mentioned_targets;
     size_t         n_mentioned_targets;
 } wfc_content_out_t;
 
-/* The server's answer to one send, delivered to the caller that made it.
+/* 一次发送的结果，只回调给发起这次发送的调用方。
  *
- * The send-result EVENT (wfc_event.h) tells every subscriber that a message
- * went out, which is what a status panel wants; a state machine needs to know
- * which of its OWN sends this was -- a call invite's UID goes into the accept
- * and into the bye. So both happen: every send raises the event, and a send
- * that passed a callback also gets that callback, once, with its `ud`.
+ * 发送结果事件（wfc_event.h）会告诉所有订阅者“有消息发出去了”，适合状态面板；
+ * 而状态机需要知道的是“我自己发的那一条”的结果 —— 通话邀请的消息 ID 之后要用
+ * 在接听和挂断里。两者都会发生：每次发送都触发事件，传了回调的发送另外还会带着
+ * 自己的 ud 回调一次。
  *
- * Runs on the wfc_mqtt task, like every other reply. `error_code` is a
- * wfc_mqtt reply code: 0 is sent, and the uid and timestamp are the
- * server's. */
+ * 与其他应答一样在长连接任务上执行。error_code 为 0 表示发送成功，此时 uid 和
+ * timestamp 是服务器分配的。 */
 typedef void (*wfc_send_result_cb_t)(int error_code, int64_t message_uid,
                                      int64_t timestamp, void *ud);
 
-/* Sends `content` to `conv`, optionally to named clients within it. This is
- * the one send path: wfc_send_text() is a wrapper, the AV SDK's signalling
- * goes out through here, and so does an application's own message type.
+/* 把 content 发到 conv，也可以只发给会话中指定的几个人。这是唯一的发送通道：
+ * wfc_send_text() 是它的封装，音视频 SDK 的信令走它，应用自定义的消息类型也
+ * 走它。
  *
- * `to_users` is WFC's directed message: the message goes to those user IDs
- * only, not to everyone in the conversation. Call signalling uses it for
- * everything -- an accept goes to the caller and to our own other clients,
- * not to a group -- and NULL/0 means the ordinary broadcast.
+ * to_users 是定向消息：消息只发给这些用户，而不是会话里的所有人。通话信令全都
+ * 用它 —— 接听只发给主叫和本账号的其他端，而不是发给一个群；传 NULL/0 表示
+ * 普通的会话广播。
  *
- * WHAT HAPPENS LOCALLY. Once the server answers, the message is filed in the
- * store exactly as an incoming one is: the conversation row takes its digest,
- * the list moves it to the top, and a conversation-update event says so. The
- * persist flag decides, the same way it decides at the far end -- a
- * transparent call invite is stored nowhere, a custom message that says
- * persist appears in the log and survives a reboot. Nothing is stored before
- * the answer: until the server names the message it has no UID, and a
- * message with no UID cannot be deduplicated against the copy that comes back
- * on the next catch-up.
+ * 本地行为：服务器应答之后，这条消息与收到的消息一样入库 —— 会话行更新摘要、
+ * 列表把它移到最前、并触发会话更新事件。存储与否由 persist_flag 决定，规则与
+ * 接收端一致：透传的通话邀请哪里都不存，声明为持久化的自定义消息会出现在消息
+ * 记录里并在重启后仍在。应答之前什么都不存：没有服务器给的消息 ID 就没法与
+ * 下次同步收回来的同一条消息去重。
  *
- * `cb` may be NULL; the send-result event is raised either way. Safe from any
- * task.
+ * cb 可以为 NULL，不影响发送结果事件。任意任务均可调用。
  *
- * On a non-OK return `cb` is not called and the caller still owns `ud`. */
+ * 返回值不是 ESP_OK 时不会回调 cb，ud 仍归调用方所有。 */
 esp_err_t wfc_send_message(const wfc_conversation_t *conv,
                            const wfc_content_out_t *content,
                            const char **to_users, size_t n_to_users,
                            wfc_send_result_cb_t cb, void *ud);
 
-/* ------------------------------------------------------- conference (AV) */
+/* ---------------------------------------------------------- 音视频房间信令 */
 
-/* One reply to a conference request. `response` is the Janus JSON the server
- * relayed back, NUL-terminated, valid only for the duration of the call;
- * NULL when the request failed or answered with nothing.
+/* 一次房间请求的应答。response 是服务器转回来的 Janus JSON，以 NUL 结尾，只在
+ * 回调期间有效；请求失败或没有返回内容时为 NULL。
  *
- * `error_code` is a wfc_mqtt reply code, NOT a Janus error: a request that
- * reaches Janus and is refused by it comes back as 0 with the refusal inside
- * `response` (data.error_code). The AV SDK has to read both. */
+ * error_code 是传输层的应答码，不是 Janus 的错误码：请求到达了 Janus 而被它
+ * 拒绝时，error_code 是 0，拒绝的原因在 response 里（data.error_code）。两者
+ * 都要看。 */
 typedef void (*wfc_conference_reply_cb_t)(int error_code, const char *response,
                                           void *ud);
 
-/* The AV control channel: PUBLISH a ConferenceRequest on the CONF topic and
- * hand the answer back.
+/* 音视频控制通道：在房间主题上发出一条会议请求，并把应答带回来。
  *
- * This is the whole of WFC's Janus signalling. The IM server proxies for
- * Janus, so a client never opens a second connection: "create_room", "join_pub",
- * "message" (which carries the SDP), "trickle", "join_sub", "keepalive" and
- * "leave" all go out here as a request name plus a JSON blob, and Janus's
- * answer comes back in the PUBACK. Server-initiated events arrive separately,
- * on the CONFN push, as wfc_on_conference_event().
+ * WFC 的 Janus 信令全部走这里。IM 服务器为 Janus 做代理，客户端不需要另开连接：
+ * create_room、join_pub、message（携带 SDP）、trickle、join_sub、keepalive、
+ * leave 都是“请求名 + 一段 JSON”，Janus 的应答在报文应答里回来。服务器主动推送
+ * 的房间事件走另一条路，即 wfc_on_conference_event()。
  *
- * `session_id` is 0 until create_room or join_pub returns one. `data` is the
- * request's JSON, or "" for the ones that take none (keepalive). `advance` is
- * the "advanced conference" flag; a 1v1 call sets it false.
+ * session_id 在 create_room 或 join_pub 返回之前为 0。data 是请求的 JSON，不带
+ * 参数的请求（如 keepalive）传 ""。advance 是“高级会议”标志，1v1 通话传 false。
  *
- * Safe from any task. `cb` fires exactly once unless this returns non-OK. */
+ * 任意任务均可调用。只要返回 ESP_OK，cb 一定且只会被调用一次。 */
 esp_err_t wfc_send_conference_request(int64_t session_id, const char *room_id,
                                       const char *request, const char *data,
                                       bool advance,
                                       wfc_conference_reply_cb_t cb, void *ud);
 
-/* Stored messages, newest first, up to `limit`. `conv` NULL walks every
- * conversation. A straight pass-through to the store, here so a UI needs only
- * this header. */
+/* 已存储的消息，从新到旧，最多 limit 条。conv 传 NULL 表示遍历所有会话。
+ * 直接转发给存储层，放在这里是为了界面只需要包含本头文件。 */
 esp_err_t wfc_get_messages(const wfc_conversation_t *conv, size_t limit,
                            wfc_store_message_cb_t cb, void *ud);
 
-/* One stored message, by the server UID a caller kept from a walk. False when
- * nothing is held under it; `cb` runs at most once and its return value is
- * ignored.
+/* 按服务器消息 ID 取一条消息。没有这条消息时返回 false；cb 最多执行一次，其
+ * 返回值被忽略。
  *
- * What this is for: a screen keeps rows, not messages -- a message BORROWS
- * (wfc_model.h) and cannot outlive the callback it arrived in, so a page that
- * wants a field it did not copy has to ask again. Copying more of the message
- * into the row instead is the trap this exists to avoid: a row is fixed size
- * and rebuilt on every repaint, so a field long enough to matter (a media URL
- * runs to CONFIG_WFC_STORE_MAX_TEXT) gets clipped there, silently.
+ * 用途：界面保存的是“行”而不是消息 —— 消息是借用内存的（wfc_model.h），出了
+ * 回调就失效，所以想用某个当初没复制下来的字段时只能再查一次。反过来把更多
+ * 字段复制进行结构里正是这个接口要避免的坑：行是定长的、每次重画都会重建，
+ * 真正长的字段（媒体地址可长达 CONFIG_WFC_STORE_MAX_TEXT）会在那里被悄悄截断。
  *
- * Cheap -- it is an index lookup on the same unique index the deduplicator
- * uses -- but not free, and it takes the store's lock. Ask from somewhere
- * that can afford it: once per thing that needs one, not once per row of a
- * redraw. */
+ * 开销不大 —— 走的是与去重相同的唯一索引 —— 但也不是免费的，而且要拿存储锁。
+ * 请在负担得起的地方调用：每个真正需要的地方查一次，而不是每次重画的每一行都
+ * 查一次。 */
 bool wfc_get_message(int64_t message_uid, wfc_store_message_cb_t cb, void *ud);
 
-/* Where the catch-up has got to, and whether it is still running. */
+/* 同步进度：拉到哪里了，是否还在同步中。 */
 int64_t  wfc_message_head(void);
 bool     wfc_is_syncing(void);
 uint32_t wfc_received_count(void);
 uint32_t wfc_sent_count(void);
 
-/* ---------------------------------------------------------- conversations */
+/* -------------------------------------------------------------------- 会话 */
 
-/* The list, newest first -- the order it is drawn in. */
+/* 会话列表，从新到旧 —— 也就是它该被画出来的顺序。 */
 esp_err_t wfc_get_conversations(size_t limit, wfc_store_conversation_cb_t cb, void *ud);
 
 bool wfc_get_conversation_info(const wfc_conversation_t *conv,
                                wfc_conversation_info_t *out);
 
-/* The badge: every conversation's unread and mention counts, summed.
+/* 总未读数：所有会话的未读数与 @ 数之和。
  *
- * The count is the ACCOUNT's, not the board's: a conversation read on the
- * phone comes down here too, when the read mark that says so arrives. It
- * arrives as a conversation-update event, like every other change to a row. */
+ * 未读数是账号的，不是这台设备的：在手机上读过的会话，其已读位置也会同步到这里
+ * 来，并以会话更新事件的形式通知。 */
 uint32_t wfc_get_unread_count(void);
 
-/* Marks a conversation read: the counters go to zero, a conversation-update
- * event redraws the list, and -- if there was anything unread -- the server
- * is told.
+/* 把一个会话标记为已读：未读数清零、触发会话更新事件重画列表，如果原本有未读，
+ * 还会上报服务器。
  *
- * Telling the server is one request that does two jobs (see
- * WFC_SETTING_CONVERSATION_SYNC in wfc_model.h): it is this account's read
- * mark, so the phone in your pocket stops showing a badge for a conversation
- * this board has read, and it is the read receipt the senders get. The second
- * half only happens where the deployment has receipts and the account has not
- * turned them off; the first happens always.
+ * 上报这一步同时做两件事（见 wfc_model.h 中的 WFC_SETTING_CONVERSATION_SYNC）：
+ * 它是本账号的已读位置，手机上那一端会因此不再为这个会话显示未读；它同时也是
+ * 发送方收到的已读回执。后半件事只在服务端支持回执且用户没有关闭回执时发生，
+ * 前半件事总会发生。
  *
- * It does NOT block and it does not go out on the caller's task -- the report
- * is left for the link supervisor, which is what makes this safe to call
- * while a screen is being built and what makes a read survive being offline.
- * The cost of that is that it is not durable: a power cut before the link
- * comes back loses the report, and the other end goes on showing the message
- * as unread until this board opens the conversation again. */
+ * 它不阻塞，也不在调用方的任务上发送 —— 上报交给连接管理去做，这既使它可以在
+ * 界面构建过程中调用，也使离线时的已读操作不会丢失。代价是它不是可靠投递的：
+ * 在连接恢复前断电会丢掉这次上报，对方会继续把消息显示为未读，直到本设备再次
+ * 打开这个会话。 */
 esp_err_t wfc_clear_unread(const wfc_conversation_t *conv);
 
-/* -------------------------------------------------------------- profiles */
+/* -------------------------------------------------------------------- 资料 */
 
-/* Answers from the cache. `refresh`, or a cache miss, also asks the server --
- * so a miss returns false now and arrives as a user-infos-update event a
- * moment later. That is the whole read model in one sentence.
+/* 从缓存里取。refresh 为 true，或缓存里没有，都会顺带向服务器发起拉取 —— 所以
+ * 缓存未命中时本次返回 false，稍后以用户资料更新事件送达。整套读模型就是这一句
+ * 话。
  *
- * Requests are batched: several misses in the same run of callbacks become
- * one UPUI, which matters when a catch-up delivers forty messages from twenty
- * people at once. */
+ * 请求是合并的：同一批回调里的多次未命中会合成一次拉取，这在一次同步带回二十个
+ * 人的四十条消息时很重要。 */
 bool wfc_get_user_info(const char *user_id, bool refresh, wfc_user_info_t *out);
 
-/* Same contract, GPGI. A group whose members are not cached, or whose cached
- * members are older than the group says they should be, also triggers a GPGM. */
+/* 同上，取群组资料。若群成员未缓存、或缓存的成员版本比群信息声明的旧，还会顺带
+ * 拉取群成员。 */
 bool wfc_get_group_info(const char *group_id, bool refresh, wfc_group_info_t *out);
 
 esp_err_t wfc_get_group_members(const char *group_id, size_t limit,
                                 wfc_store_group_member_cb_t cb, void *ud);
 
-/* The name to draw for a user, in WFC's order of precedence:
+/* 同上，取频道资料，一次一个频道。频道会话的标题只能来自这里：它的 target 是
+ * 频道 ID，用户缓存和群组缓存都认不出来。 */
+bool wfc_get_channel_info(const char *channel_id, bool refresh,
+                          wfc_channel_info_t *out);
+
+/* 一个用户该显示的名字，优先级依次为：
  *
- *   group alias   what they call themselves in this group   (`group_id` set)
- *   friend alias  what I call them
- *   display name  their nickname
- *   name          their login name
- *   <user_id>     angle brackets, so an unresolved ID looks unresolved
+ *   群昵称    他在这个群里给自己起的名字   （传了 group_id 时）
+ *   好友备注  我给他起的名字
+ *   昵称      他的昵称
+ *   用户名    他的登录名
+ *   <user_id> 尖括号，让“还没拉到资料”一眼可辨
  *
- * Always writes something. `group_id` may be NULL or "" outside a group.
+ * 总会写入一些内容。不在群里时 group_id 传 NULL 或 ""。
  *
- * It does NOT fetch: a name that is missing is missing because the profile is
- * not cached, and this is called once per row per redraw, so making it ask
- * the server would put a UPUI behind every scroll. Call wfc_get_user_info()
- * when a screen appears to prime the cache, then let the event redraw it. */
+ * 它不会发起拉取：名字缺失是因为资料没缓存，而这个函数每次重画的每一行都要调
+ * 一次，若让它去问服务器，等于每次滚动都伴随一串拉取请求。正确做法是界面出现时
+ * 调用 wfc_get_user_info() 预热缓存，再由事件触发重画。 */
 void wfc_get_display_name(const char *user_id, const char *group_id,
                           char *buf, size_t buf_size);
 
-/* The name to draw for a conversation: the group's name for a group, the
- * other end's display name for a single chat. Always writes something. */
+/* 一个会话该显示的标题：群会话用群名，频道会话用频道名，单聊用对方的显示名。
+ * 总会写入一些内容 —— 什么都还认不出来时写尖括号包起来的 target，这就是“该去
+ * 预热缓存并重画”的信号。 */
 void wfc_get_conversation_title(const wfc_conversation_t *conv, char *buf,
                                 size_t buf_size);
 
-/* --------------------------------------------------------------- friends */
+/* -------------------------------------------------------------------- 好友 */
 
 esp_err_t wfc_get_friends(size_t limit, wfc_store_friend_cb_t cb, void *ud);
 
 bool wfc_is_friend(const char *user_id);
 
-/* Friend requests in both directions, answered ones included. Which side of a
- * request this client is on is `from_uid` against wfc_client_user_id(); the
- * wire carries no direction field. */
+/* 双向的好友请求，包括已处理过的。请求的方向要用 from_uid 与
+ * wfc_client_user_id() 比较得出，协议里没有方向字段。 */
 esp_err_t wfc_get_friend_requests(size_t limit, wfc_store_friend_request_cb_t cb,
                                   void *ud);
 
-/* ------------------------------------------------- changing a relationship */
+/* ------------------------------------------------------------ 关系类写操作 */
 
-/* The eight writes below are the other side of the two lists above and of the
- * group caches: everything else in this header either reads the store or asks
- * the server to refresh it, and these change what the server holds.
+/* 下面八个写接口是上面两个列表和群组缓存的另一半：本头文件里其他接口要么读本地
+ * 存储，要么请求服务器刷新它，而这几个改变的是服务器上的数据。
  *
- * They share one shape, and it is worth stating once.
+ * 它们共用同一套约定：
  *
- *   Nothing is written locally before the server agrees. The request goes out,
- *   and the row this board keeps is filed when -- and only when -- the reply
- *   says it worked. A refused change simply does not happen, rather than
- *   appearing on screen and then being taken back. Same rule as UP.
+ *   服务器同意之前不写本地。请求发出去，只有在应答说成功之后才写入本地的那一行。
+ *   被拒绝的修改就是没有发生过，而不是先显示出来再撤回。
  *
- *   The local row is usually a head start rather than the truth: the server
- *   announces the change to this account too (FN, FRN, or a group
- *   notification message) and the delta that follows overwrites it. Two are
- *   the exception, and on those the local row is all there is --
- *   wfc_send_friend_request(), which the server tells only the person being
- *   asked, and wfc_quit_group(), which it announces to the group after this
- *   account has already left it.
+ *   本地那一行通常只是抢先一步，而不是最终结果：服务器随后会把这次变更也通知
+ *   本账号（好友、好友请求或群通知消息），后到的增量会覆盖它。两个例外是
+ *   wfc_send_friend_request()（服务器只通知被请求的人）和 wfc_quit_group()
+ *   （通知的是群里其他人），这两种情况下本地写入就是全部。
  *
- *   A row this client wrote itself carries version 0. update_dt on a stored
- *   profile is the server's version of it and goes straight back out in the
- *   next request; a number we invented there would make the server answer
- *   "not modified" and the real record would never arrive.
+ *   客户端自己写的行版本号为 0。已存储资料上的 update_dt 是服务器的版本号，会
+ *   原样带进下一次请求；在那里填一个自己编的数字会让服务器回答“没有更新”，真正
+ *   的记录就永远拉不回来了。
  *
- * The reply reaches `cb` on the wfc_mqtt task, so wfc_event.h's rules apply to
- * it: do not block, do not touch widgets. `error_code` is 0 for success, 222
- * when only some of a batch went through (the group ones), and otherwise a
- * server code from errorCode.js. `cb` may be NULL.
+ * 应答在长连接任务上回调 cb，因此适用 wfc_event.h 的规则：不要阻塞，不要碰
+ * 控件。error_code 为 0 表示成功，222 表示批量操作只成功了一部分（群相关接口），
+ * 其余为服务器错误码。cb 可以为 NULL。
  *
- * The esp_err_t each returns says only whether the request was submitted --
- * ESP_ERR_INVALID_STATE when the link is down, ESP_ERR_INVALID_ARG on
- * nonsense, ESP_ERR_INVALID_SIZE past WFC_OP_MEMBERS_MAX. When it is not
- * ESP_OK, `cb` is not called. */
+ * 每个函数的 esp_err_t 返回值只说明请求有没有提交出去：连接断开时为
+ * ESP_ERR_INVALID_STATE，参数不合法为 ESP_ERR_INVALID_ARG，超过
+ * WFC_OP_MEMBERS_MAX 为 ESP_ERR_INVALID_SIZE。不是 ESP_OK 时不会回调 cb。 */
 typedef void (*wfc_operation_cb_t)(int error_code, void *ud);
 
-/* How many people one group request may name. A board builds a group out of
- * the handful of people on its contacts page; a hundred-person roster is
- * assembled somewhere with a keyboard. Past it the call is rejected rather
- * than truncated, because silently inviting eleven of twelve people is worse
- * than not inviting anyone. */
+/* 一次群操作最多可以指定多少人。设备是从通讯录页面上的几个人建群的，上百人的
+ * 群还是在有键盘的地方组织。超过这个数直接拒绝而不是截断：悄悄地把十二个人里的
+ * 十一个拉进群，比一个都没拉更糟。 */
 #define WFC_OP_MEMBERS_MAX 32
 
-/* FAR. Ask to be someone's friend. `reason` is the free text they see beside
- * the request and may be NULL. */
+/* 发起好友请求。reason 是对方会看到的附言，可以为 NULL。 */
 esp_err_t wfc_send_friend_request(const char *user_id, const char *reason,
                                   wfc_operation_cb_t cb, void *ud);
 
-/* FHR. Answer a request somebody sent us. `user_id` is the sender -- the side
- * of the pair that is not this account. Accepting makes both sides friends,
- * which arrives a moment later as a friend-list update. */
+/* 处理别人发来的好友请求。user_id 是发起方，即这一对里不是本账号的那一方。
+ * 接受之后双方成为好友，稍后会以好友列表更新事件送达。 */
 esp_err_t wfc_handle_friend_request(const char *user_id, bool accept,
                                     wfc_operation_cb_t cb, void *ud);
 
-/* FDL. End a friendship, both ways: the server clears the relationship on
- * both accounts, so the other end stops being able to see this one too. */
+/* 删除好友，双向生效：服务器会清掉两个账号上的关系，对方也不再能看到本账号。 */
 esp_err_t wfc_delete_friend(const char *user_id, wfc_operation_cb_t cb, void *ud);
 
-/* FALS. Set what I call them, which wins over their nickname everywhere a
- * name is drawn (wfc_get_display_name). "" clears it.
- *
- * Note the topic: FALS is the alias, and FAR is the friend request. The two
- * carry the same AddFriendRequest protobuf, which is why they are easy to
- * mistake for each other. */
+/* 设置好友备注名，它在所有显示名字的地方优先于对方的昵称
+ * （见 wfc_get_display_name）。传 "" 表示清除。 */
 esp_err_t wfc_set_friend_alias(const char *user_id, const char *alias,
                                wfc_operation_cb_t cb, void *ud);
 
-/* ------------------------------------------------------- group management */
+/* -------------------------------------------------------------------- 群组 */
 
-/* GC. Create a group and get its ID back.
+/* 创建群组并取回群 ID。
  *
- * The server assigns the ID, adds this account as the owner whether or not it
- * is in `members`, and posts the "created the group" notification itself --
- * which is why nothing here says anything about a notification. A client that
- * sent its own would be refused outright on any deployment that has not
- * turned on custom group notifications (CreateGroupHandler.java:37).
+ * 群 ID 由服务器分配，无论 members 里有没有本账号，服务器都会把它设为群主，
+ * 并且由服务器自己发出“创建了群组”的通知消息 —— 所以这里不需要客户端再发一条。
+ * 未开启自定义群通知的服务端会直接拒绝客户端发的群通知。
  *
- * `cb` gets the new group ID, valid for that call only. The group is in the
- * store by the time it runs, so wfc_get_group_info() answers immediately;
- * a conversation row appears when the notification message lands. */
+ * cb 拿到的新群 ID 只在该次回调内有效。回调执行时群资料已经入库，
+ * wfc_get_group_info() 可以立即取到；会话行则在通知消息到达时出现。 */
 typedef void (*wfc_create_group_cb_t)(int error_code, const char *group_id,
                                       void *ud);
 
 esp_err_t wfc_create_group(const char *name, const char **members, size_t n_members,
                            wfc_create_group_cb_t cb, void *ud);
 
-/* GAM / GKM. Invite people in, or remove them.
+/* 拉人入群 / 把人移出群。
  *
- * Who is allowed to do which is the server's business and depends on the
- * group's type and on whether this account owns or manages it -- a refusal
- * comes back as an error code rather than being predicted here. */
+ * 谁有权做哪一项由服务器判断，取决于群类型以及本账号是不是群主或管理员 ——
+ * 被拒绝时以错误码返回，客户端不做预判。 */
 esp_err_t wfc_add_group_members(const char *group_id, const char **members,
                                 size_t n_members, wfc_operation_cb_t cb, void *ud);
 esp_err_t wfc_kick_group_members(const char *group_id, const char **members,
                                  size_t n_members, wfc_operation_cb_t cb, void *ud);
 
-/* GQ. Leave a group.
+/* 退出群组。
  *
- * This board also drops the conversation and the messages in it, which is a
- * departure from WFC.js -- see ASSESSMENT.md section 8.13. A row that cannot
- * be written to and will never receive anything again is not one to keep on a
- * list of sixty-four. Subscribers hear about it as a conversation-removed
- * event (wfc_event.h). */
+ * 本客户端同时会删掉这个会话及其中的消息：一个既发不了消息、也不会再收到消息的
+ * 会话，不值得留在一份最多几十行的列表里。订阅方会收到会话删除事件
+ * （wfc_event.h）。 */
 esp_err_t wfc_quit_group(const char *group_id, wfc_operation_cb_t cb, void *ud);
 
-/* ------------------------------------------------------------------ locks */
+/* ---------------------------------------------------------------------- 锁 */
 
-/* SLT. The deployment's one distributed lock, held on the server and named by
- * a string both ends agree on.
+/* WFC 的分布式锁：锁在服务器上，用一个两端约定好的字符串命名。
  *
- * It is here rather than in whatever feature wants it because that is where
- * every other client keeps it -- WFC.js has requireLock() on the client
- * object (wfcImpl.js:4800) and Android has it on ChatManager -- and because
- * nothing about it is specific to one: it is a `putIfAbsent` on a map with an
- * expiry (MemoryMessagesStore.java:9264), and what it means is entirely up to
- * the two sides that pick the same name.
+ * 它放在这里而不是放在用到它的功能里，是因为其他 WFC 客户端也都把它放在客户端
+ * 对象上，而且它本身与任何具体功能无关：服务端实现就是一张带过期时间的 map 上
+ * 的 putIfAbsent，锁名的含义完全由取同一个名字的双方决定。
  *
- * The one caller in this tree is push-to-talk, which uses it as the microphone
- * of a two-person channel: whoever gets the lock talks and the other is told
- * the channel is busy.
+ * 本仓库里唯一的使用者是对讲：它把锁当作两人频道的麦克风 —— 抢到锁的人说话，
+ * 另一方被告知频道忙。
  *
- * `duration_s` is how long the server keeps it before it expires on its own.
- * That expiry is the whole safety net -- a client that crashes mid-hold does
- * not lock a channel forever -- so it should be a few seconds, not a few
- * minutes, and a holder that needs longer asks again (a repeat from the same
- * account refreshes rather than fails).
+ * duration_s 是服务器在自动释放前保留这把锁的时间。这个过期时间就是全部的安全
+ * 网 —— 持锁时崩溃的客户端不会把频道永久锁死 —— 所以它应该是几秒而不是几分钟，
+ * 需要更久的持有方再申请一次即可（同一账号重复申请是续期而不是失败）。
  *
- * Error codes worth naming, from ErrorCode.java:
+ * 值得记住的两个错误码：
  *
- *   25  someone else holds it   (require)
- *   26  it is not yours to drop (release)
+ *   25  锁在别人手上（申请时）
+ *   26  这把锁不是你的（释放时）
  *
- * Same shape as the eight writes above: ESP_OK means the request went out,
- * `cb` runs on the wfc_mqtt task with the server's answer, and nothing is
- * kept locally either way -- there is no local lock table, because a lock
- * whose holder this board guessed at would be worse than asking. */
+ * 约定与上面八个写接口相同：返回 ESP_OK 表示请求已发出，cb 在长连接任务上带回
+ * 服务器的应答，本地不保存任何状态 —— 没有本地锁表，因为一份靠猜维护的持锁人
+ * 记录还不如每次都问服务器。 */
 
-/* Long enough for "WFPTT_" and two user IDs, which is the longest name this
- * tree builds. Past it the call is rejected: half a lock ID names a different
- * lock, and taking the wrong one looks exactly like taking the right one. */
+/* 够放下 "WFPTT_" 加两个用户 ID，这是本仓库里最长的锁名。超长直接拒绝：截断后
+ * 的锁 ID 指的是另一把锁，而抢到错误的锁和抢到正确的锁看起来一模一样。 */
 #define WFC_LOCK_ID_MAX 96
 
 esp_err_t wfc_require_lock(const char *lock_id, int32_t duration_s,
                            wfc_operation_cb_t cb, void *ud);
 esp_err_t wfc_release_lock(const char *lock_id, wfc_operation_cb_t cb, void *ud);
 
-/* --------------------------------------------------------------- receipts */
+/* -------------------------------------------------------------------- 回执 */
 
-/* How far the other side has got. Reads answer from the store like every
- * other read here; what fills the store is RCP and RDP, which are only synced
- * where the deployment has the feature (wfc_route.h) -- so on a server
- * without it every one of these answers "nothing yet", which is the honest
- * answer and needs no branch at the call site.
+/* 对方读到哪里了。与这里其他读接口一样直接查本地存储；填充存储的是送达回执和
+ * 已读回执的同步，而它们只在服务端开启了回执功能时才会进行 —— 所以在没有该功能
+ * 的服务端上，下面每个接口都回答“还没有”，这既是实话，也省掉了调用处的分支。
  *
- * The two lists are shaped differently and wfc_model.h says why: a delivery
- * is one clock per PERSON, a read is one per person per conversation. */
+ * 两个列表的形状不同，原因见 wfc_model.h：送达是每个人一个时间点，已读是每个人
+ * 在每个会话里一个时间点。 */
 
-/* True when a receipt means anything here: the deployment has the feature and
- * the account has not turned receipts off. A screen can use it to leave the
- * whole column out rather than drawing ticks that will never fill in. */
+/* 回执在这里有没有意义：服务端开启了该功能，且用户没有关闭回执。界面可以据此
+ * 整列不画，而不是画一排永远不会变化的标记。 */
 bool wfc_is_receipt_enabled(void);
 
-/* 0 when nothing is held, which reads as "not yet" and is what a caller
- * wants either way. */
+/* 没有记录时返回 0，读作“还没有”，这正是调用方需要的结果。 */
 int64_t wfc_get_delivery(const char *user_id);
 int64_t wfc_get_read(const wfc_conversation_t *conv, const char *user_id);
 
-/* Everyone whose read mark this store holds for `conv`. */
+/* 本地保存的、conv 中所有人的已读位置。 */
 esp_err_t wfc_get_reads(const wfc_conversation_t *conv, size_t limit,
                         wfc_store_read_cb_t cb, void *ud);
 
-/* What to draw against one message we sent, in a SINGLE chat: the two lookups
- * above against its timestamp, in the order that matters (read implies
- * delivered, so read wins).
+/* 单聊中，自己发出的一条消息该显示什么状态：用上面两个接口与消息时间戳比较，
+ * 并按优先级取值（已读蕴含已送达，所以已读优先）。
  *
- * A group answers WFC_RECEIPT_SENT, deliberately -- "delivered" has no single
- * meaning across twenty people, and what a group wants is a number.
- * wfc_message_read_count() is that number. */
+ * 群会话一律返回 WFC_RECEIPT_SENT，这是有意的 —— “已送达”在二十个人之间没有
+ * 单一含义，群里想要的是一个数字，那个数字是 wfc_message_read_count()。 */
 typedef enum {
-    WFC_RECEIPT_SENT      = 0,   /* the server has it; nobody has it yet */
+    WFC_RECEIPT_SENT      = 0,   /* 服务器已收到，还没有人收到 */
     WFC_RECEIPT_DELIVERED = 1,
     WFC_RECEIPT_READ      = 2,
 } wfc_receipt_t;
 
 wfc_receipt_t wfc_message_receipt(const wfc_conversation_t *conv, int64_t timestamp);
 
-/* How many people have read as far as `timestamp`. Works for both kinds of
- * conversation; a single chat answers 0 or 1. */
+/* 有多少人已经读到 timestamp。单聊和群会话都适用，单聊返回 0 或 1。 */
 size_t wfc_message_read_count(const wfc_conversation_t *conv, int64_t timestamp);
 
-/* --------------------------------------------------------- user settings */
+/* ---------------------------------------------------------------- 用户设置 */
 
-/* The account's settings, which are the account's and not the board's: what
- * it has pinned, what it has muted, and whatever else the phone or the
- * desktop client has set. UG pulls them, UP changes one, and every device
- * logged in sees the change.
+/* 账号级的设置，属于账号而不属于这台设备：置顶了哪些会话、静音了哪些会话，以及
+ * 手机或桌面端设置过的其他内容。拉取是整份拉，修改是一次改一项，账号登录的每一
+ * 端都会看到这次修改。
  *
- * Reads answer from the store and never fetch, like every other read here.
- * A setting that has never been set is simply absent -- false, and `buf`
- * empty -- which is how a default reaches the caller with no second path.
+ * 读接口与这里其他读接口一样只查本地存储，不会发起请求。从未设置过的项就是不
+ * 存在 —— 返回 false，buf 为空 —— 默认值因此不需要第二条代码路径。
  *
- * The write does not wait: it sends and returns, and the local row appears
- * when the server acknowledges it, at which point a user-settings-update
- * event says so. A rejected change therefore does nothing at all, which is
- * the honest outcome -- a screen that showed it and then took it back would
- * be worse. ESP_OK here means "sent", not "set".
+ * 写接口不等待：发出去就返回，本地那一行在服务器确认后才出现，届时会触发用户
+ * 设置更新事件。所以被拒绝的修改什么都不会发生，这比先显示再撤回诚实。返回
+ * ESP_OK 的含义是“已发送”，不是“已生效”。
  *
- * NOT safe from an LVGL callback: it reaches a blocking send() on the long
- * link (see the threading note in ui_page.h on the application side). */
+ * 写接口不能在 LVGL 回调里调用：它会走到长连接上的阻塞发送。 */
 bool wfc_get_user_setting(int32_t scope, const char *key, char *buf, size_t buf_size);
 
 esp_err_t wfc_get_user_settings(int32_t scope, size_t limit,
@@ -642,11 +527,9 @@ esp_err_t wfc_get_user_settings(int32_t scope, size_t limit,
 
 esp_err_t wfc_set_user_setting(int32_t scope, const char *key, const char *value);
 
-/* Pinned and muted, the two settings that are about a conversation. Both go
- * through wfc_set_user_setting() with the key WFC builds from (type, line,
- * target); the conversation's row picks the change up when the server
- * acknowledges it, and the list re-sorts on the conversation-update event
- * that follows. Same threading rule as above. */
+/* 置顶与免打扰，两个与会话有关的设置。它们都通过 wfc_set_user_setting() 写入，
+ * 键由 (type, line, target) 拼成；服务器确认后会话行会更新，随之而来的会话更新
+ * 事件会让列表重新排序。线程限制同上。 */
 esp_err_t wfc_set_conversation_top(const wfc_conversation_t *conv, bool top);
 esp_err_t wfc_set_conversation_silent(const wfc_conversation_t *conv, bool silent);
 

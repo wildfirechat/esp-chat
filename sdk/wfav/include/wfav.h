@@ -1,10 +1,9 @@
-/* The AV SDK, in one include.
+/* 音视频 SDK，一个头文件全包含。
  *
- * wfav is to wfc what avenginekit.js is to WFC.js: a separate component that
- * speaks the same protocol over the same connection and knows nothing the IM
- * client does not already expose. Including this pulls the four headers that
- * matter -- the engine that owns the call, the session a screen reads, the
- * events it subscribes to, and the vocabulary all three share.
+ * wfav 之于 wfc，相当于 avenginekit.js 之于 WFC.js：一个独立的组件，走同一条
+ * 连接、同一套协议，用到的东西 IM 客户端全都已经对外暴露。包含本文件会引入四个
+ * 头文件 —— 管理通话的引擎、界面读取的会话、要订阅的事件，以及三者共用的类型
+ * 定义。
  */
 
 #ifndef WFAV_H

@@ -1,33 +1,29 @@
-/* Typed push-to-talk events, on the terms wfc_event.h and wfav_event.h set.
+/* 强类型的对讲事件，约定与 wfc_event.h、wfav_event.h 相同。
  *
- * Five events, and they are the two callbacks the reference clients have
- * flattened out: TalkingCallback is what happens to OUR press of the button
- * (begin / end / refused), PttCallback is what happens to somebody ELSE's
- * (started / stopped). One typedef and one subscribe function each, with the
- * callback held in a union rather than behind a cast -- wfc_event.c explains
- * why at length, and the short version is that an event which grows a
- * parameter should produce a list of compile errors.
+ * 五个事件，是参考客户端那两个回调展开后的结果：一个是本机按下按钮之后发生的事
+ * （开始 / 结束 / 被拒绝），另一个是别人按下按钮之后发生的事（开始说话 / 停止
+ * 说话）。每个事件一个回调类型、一个订阅函数，回调保存在联合体里而不是藏在强制
+ * 类型转换后面 —— 理由与 wfc_event.h 相同：某个事件多了一个参数时，应该得到一串
+ * 编译错误。
  *
  * ------------------------------------------------------------------------
- * Threading.
+ * 线程模型。
  *
- * Every callback runs on the wfptt task. Not the long link's, and not the
- * player's: an IM message arriving, a lock reply arriving and the talk timer
- * expiring are three different tasks' worth of input, and funnelling them
- * onto one is what makes the state machine single threaded.
+ * 所有回调都在 wfptt 任务上执行。不是长连接的任务，也不是播放任务：IM 消息到达、
+ * 锁的应答到达、发言计时器到期，是三个任务带来的输入，把它们汇聚到一个任务上，
+ * 状态机才是单线程的。
  *
- * The usual three rules follow:
+ * 于是又是那三条规则：
  *
- *   - do not block. This task is also what publishes a chunk of audio every
- *     400 ms, and a chunk that is late is a gap the far end hears.
- *   - do not touch LVGL. Post to the UI.
- *   - do not call wfptt_stop() and then wait for anything. wfptt_release_talk()
- *     is safe and is the normal thing to do.
+ *   - 不要阻塞。这个任务同时还要每 400 ms 发布一块音频，晚发出去的一块，对端
+ *     听到的就是一段空白。
+ *   - 不要碰 LVGL，请投递给 UI 任务。
+ *   - 不要调用 wfptt_stop() 之后再等待什么。wfptt_release_talk() 是安全的，也是
+ *     正常的做法。
  *
- * Subscribing and unsubscribing are safe from any task, including from inside
- * the callback being cancelled.
+ * 订阅和退订在任意任务里都安全，在被退订的那个回调内部也安全。
  *
- * Every pointer handed to a callback dies with the call.
+ * 传给回调的所有指针随该次调用失效。
  */
 
 #ifndef WFPTT_EVENT_H
@@ -45,46 +41,40 @@ extern "C" {
 
 typedef struct wfptt_subscription wfptt_subscription_t;
 
-/* --------------------------------------------------------------- events */
+/* -------------------------------------------------------------------- 事件 */
 
-/* The channel is ours: the microphone is open and the first chunk is on its
- * way. This is the cue to show a talking indicator, and on hardware with one
- * it is the cue to beep.
+/* 频道拿到了：麦克风已经打开，第一块音频正在路上。这是显示“正在说话”提示的时机，
+ * 硬件上有提示音的话，也是该响的时机。
  *
- * On a channel that allows one speaker this is a round trip after the button
- * went down -- the lock had to be asked for -- so it is an event rather than
- * a return value. */
+ * 在只允许一个人说话的频道上，它发生在按钮按下之后的一次往返之后 —— 锁需要去
+ * 申请 —— 所以它是一个事件，而不是一个返回值。 */
 typedef void (*wfptt_on_talk_begin_t)(const wfc_conversation_t *conv, void *ud);
 
-/* Our talk is over, for this reason: the button came up, the cap was
- * reached, the group muted us, the link went away. The microphone is already
- * closed by the time this runs. */
+/* 本机的发言结束了，原因如参数所示：松开了按钮、达到时长上限、被群禁言、连接
+ * 断开等。这个回调执行时麦克风已经关闭。 */
 typedef void (*wfptt_on_talk_end_t)(const wfc_conversation_t *conv,
                                     wfptt_end_reason_t reason, void *ud);
 
-/* The channel was refused. `error_code` is one of the WFPTT_ERR_* values, and
- * the one worth telling a person about by name is OCCUPIED: somebody else is
- * holding the microphone. Nothing was opened and nothing was sent. */
+/* 频道申请被拒绝。error_code 是 WFPTT_ERR_* 之一，其中值得明确告诉用户的是
+ * OCCUPIED：麦克风在别人手上。此时什么都没有打开，也什么都没有发出去。 */
 typedef void (*wfptt_on_talk_failed_t)(const wfc_conversation_t *conv,
                                        int error_code, void *ud);
 
-/* Somebody started talking, or stopped.
+/* 有人开始说话，或者停止了说话。
  *
- * "Stopped" is either their pttEnd or their silence: a talker whose audio has
- * not arrived for WFPTT_TALKER_TIMEOUT_MS is treated as gone, because a
- * client that was switched off mid-sentence sends no end notification and the
- * channel would otherwise stay occupied forever.
+ * “停止”有两种来源：对方的结束消息，或者对方的沉默 —— 超过
+ * WFPTT_TALKER_TIMEOUT_MS 没有收到音频的说话人会被当作已经离开，因为说到一半被
+ * 关机的客户端不会发出结束通知，否则频道会一直被占着。
  *
- * Being told somebody is talking is not the same as hearing them. This board
- * has one speaker and no mixer, so it plays one talker at a time
- * (wfptt_client.h); the others are still reported here, which is what lets a
- * screen show a channel with three people on it. */
+ * 被告知有人在说话，和听得见他，不是一回事。本设备只有一个扬声器、没有混音器，
+ * 所以一次只播一个人（见 wfptt_client.h）；其余的人仍然会在这里报出来，界面因此
+ * 可以显示一个有三个人的频道。 */
 typedef void (*wfptt_on_user_start_talking_t)(const wfc_conversation_t *conv,
                                               const char *user_id, void *ud);
 typedef void (*wfptt_on_user_end_talking_t)(const wfc_conversation_t *conv,
                                             const char *user_id, void *ud);
 
-/* ---------------------------------------------------------- subscribing */
+/* -------------------------------------------------------------------- 订阅 */
 
 wfptt_subscription_t *wfptt_on_talk_begin(wfptt_on_talk_begin_t cb, void *ud);
 wfptt_subscription_t *wfptt_on_talk_end(wfptt_on_talk_end_t cb, void *ud);
@@ -94,10 +84,10 @@ wfptt_subscription_t *wfptt_on_user_start_talking(wfptt_on_user_start_talking_t 
 wfptt_subscription_t *wfptt_on_user_end_talking(wfptt_on_user_end_talking_t cb,
                                                 void *ud);
 
-/* Safe on NULL, and safe from inside the callback being cancelled. */
+/* 传 NULL 是安全的，在被退订的那个回调内部调用也是安全的。 */
 void wfptt_unsubscribe(wfptt_subscription_t *sub);
 
-/* Cancels each and NULLs the entries -- one line to tear a screen down. */
+/* 逐个退订并把数组元素置空 —— 一行拆掉一个页面的所有订阅。 */
 void wfptt_unsubscribe_all(wfptt_subscription_t **subs, size_t n);
 
 #ifdef __cplusplus

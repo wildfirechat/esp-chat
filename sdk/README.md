@@ -9,28 +9,34 @@
 
 | 模块 | 内容 | 归档 | 源码版本 |
 |---|---|---|---|
-| [wfc/](./wfc/) | IM 客户端：协议、存储、模型、事件 | `lib/libwfc.a` 2912 KB | cf9f966 2026-09-08 |
-| [wfav/](./wfav/) | 音视频 SDK：通话信令、WebRTC、Opus | `lib/libwfav.a` 214 KB | 85b27ce 2026-09-02 |
-| [wfptt/](./wfptt/) | 对讲 SDK：频道、抢麦、AMR-NB 分片 | `lib/libwfptt.a` 67 KB | 0df238a 2026-09-04 |
+| [wfc/](./wfc/) | IM 客户端：协议、存储、模型、事件 | `lib/libwfc.a` 2980 KB | 4bfb4d1 2026-09-09 |
+| [wfav/](./wfav/) | 音视频 SDK：通话信令、WebRTC、Opus | `lib/libwfav.a` 214 KB | 6cf1f8e 2026-09-09 |
+| [wfptt/](./wfptt/) | 对讲 SDK：频道、抢麦、AMR-NB 分片 | `lib/libwfptt.a` 67 KB | fc112db 2026-09-09 |
 
 ```
 target      esp32s3
 IDF         v6.1.0
-打包日期     2026-09-08
+打包日期     2026-09-10
 sha256
-    wfc   caeddfced68c407275da67d24e5204296da1754979f00d76c663dc1c91ef3511
-    wfav  1fdd6363cdeb7e4001872343f6115a231e389fd00c0803395f29b3712facfae9
+    wfc   e8141f757ab837138607741b9a8c2da165d07957357ac4c4e70fe178455c3723
+    wfav  d9267ef4be075b6dc49391ae67e2bb00f80d8d35d7edf113b9da1ecb78ef89d7
     wfptt 1a063cfaf50bae9ca2cb8b020352deb92325492ec704e653d4b0503841b0c837
 ```
 
 ## 公开头文件
 
-- **wfc**：`wfc_client.h`、`wfc_content.h`、`wfc_crypto.h`、`wfc_event.h`、`wfc_media.h`、`wfc_mem.h`、`wfc_model.h`、`wfc_mqtt.h`、`wfc_pb.h`、`wfc_platform.h`、`wfc_route.h`、`wfc_store.h`、`wfc_token.h`
+- **wfc**：`wfc_client.h`、`wfc_content.h`、`wfc_event.h`、`wfc_media.h`、`wfc_mem.h`、`wfc_model.h`、`wfc_platform.h`、`wfc_store.h`
 - **wfav**：`wfav.h`、`wfav_engine.h`、`wfav_event.h`、`wfav_session.h`、`wfav_types.h`
 - **wfptt**：`wfptt.h`、`wfptt_audio.h`、`wfptt_client.h`、`wfptt_event.h`、`wfptt_types.h`
 
 `pbc`（protobuf 运行时）和 `sqlite3` 的头文件不在这里：它们是 `libwfc.a` 的内部
 依赖，已经合进同一个归档，没有任何一个公开头文件 include 它们。
+
+模块内部的头文件也不在这里。它们是 SDK 和服务器之间的那一层——长连接、`/route`、
+protobuf 读写、报文加解密——已经编进 `.a`，应用既不需要 include，也不应该依赖：
+它们随协议变动，不算对外接口。
+
+- **wfc**：`wfc_crypto.h`、`wfc_mqtt.h`、`wfc_pb.h`、`wfc_route.h`、`wfc_token.h`
 
 ## 编译期已经定死的配置
 
